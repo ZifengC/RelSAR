@@ -1,16 +1,22 @@
 import argparse
 import math
+import os
+import sys
 from collections import Counter, defaultdict
 
 import torch
 from tqdm import tqdm
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from utils import const, utils
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description='Build a static top-k item graph for UniSAR.')
+        description='Build a static top-k item graph for RelSAR.')
     parser.add_argument('--data',
                         type=str,
                         default='KuaiSAR',
@@ -36,7 +42,7 @@ def init_const(data_name):
 
 
 def build_src_proxy_items(session_vocab):
-    pos_items = session_vocab['pos_items']
+    pos_items = torch.as_tensor(session_vocab['pos_items'], dtype=torch.long)
     proxy_items = torch.zeros(pos_items.shape[0], dtype=torch.long)
     non_zero_mask = pos_items != 0
     has_click = non_zero_mask.any(dim=1)

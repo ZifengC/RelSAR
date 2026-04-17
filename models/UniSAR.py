@@ -457,7 +457,7 @@ class UniSAR(BaseModel):
         intent_match_logits = torch.matmul(query_proj, token_intent.transpose(
             -1, -2)) / math.sqrt(query_proj.size(-1))
         intent_match_logits = intent_match_logits + token_uncertainty.transpose(
-            -1, -2) + target_uncertainty
+            -1, -2) + target_uncertainty.transpose(-1, -2)
         intent_match_logits = intent_match_logits / self.intent_temp
 
         graph_prior = self.get_graph_prior(target_item_ids, token_item_ids)
