@@ -461,9 +461,9 @@ class SarRunner(BaseRunner):
         logging.info("total time: {:.2f}s".format(time.time() - start))
         diagnostic_keys = [
             'intent_mu_norm', 'uncertainty_mean', 'uncertainty_std',
-            'cf_mask_mean', 'cf_necessity_mean', 'cf_potential_mean',
-            'cf_self_mean', 'path_s2s', 'path_r2s', 'path_r2r', 'path_s2r',
-            'attention_peak'
+            'prototype_entropy_mean', 'prototype_gap_mean', 'cf_mask_mean',
+            'cf_necessity_mean', 'cf_potential_mean', 'cf_self_mean',
+            'path_s2s', 'path_r2s', 'path_r2r', 'path_s2r', 'attention_peak'
         ]
         rec_diag = " ".join([
             "{}:{:.4f}".format(k, np.mean(loss_dict['rec'][k]).item())

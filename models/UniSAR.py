@@ -28,6 +28,10 @@ class UniSAR(BaseModel):
                             type=List,
                             default=[200, 80, 1])
         parser.add_argument('--intent_temp', type=float, default=0.7)
+        parser.add_argument('--intent_prototypes', type=int, default=8)
+        parser.add_argument('--prototype_uncertainty_weight',
+                            type=float,
+                            default=0.5)
         parser.add_argument('--item_graph_path', type=str, default='')
         parser.add_argument('--uncertainty_reg_weight', type=float, default=0.0001)
         parser.add_argument('--cf_sparsity_weight', type=float, default=0.0001)
@@ -53,6 +57,8 @@ class UniSAR(BaseModel):
         self.num_heads = args.num_heads
         self.batch_size = args.batch_size
         self.intent_temp = args.intent_temp
+        self.intent_prototypes = args.intent_prototypes
+        self.prototype_uncertainty_weight = args.prototype_uncertainty_weight
         self.item_graph_path = args.item_graph_path
         self.uncertainty_reg_weight = args.uncertainty_reg_weight
         self.cf_sparsity_weight = args.cf_sparsity_weight
@@ -105,6 +111,8 @@ class UniSAR(BaseModel):
 
         self.intent_mean_proj = nn.Linear(self.item_size, self.item_size)
         self.intent_logvar_proj = nn.Linear(self.item_size, self.item_size)
+        self.intent_prototype_bank = nn.Parameter(
+            torch.randn(self.intent_prototypes, self.item_size))
         self.intent_query_proj = nn.Linear(self.item_size, self.item_size)
         self.intent_key_proj = nn.Linear(self.item_size, self.item_size)
         self.intent_value_proj = nn.Linear(self.item_size, self.item_size)
@@ -278,14 +286,44 @@ class UniSAR(BaseModel):
             return torch.zeros_like(entropy)
         return entropy / math.log(support)
 
+    def compute_prototype_uncertainty(self, token_emb):
+        prototypes = F.normalize(self.intent_prototype_bank, dim=-1)
+        token_norm = F.normalize(token_emb, dim=-1)
+        assign_logits = torch.matmul(token_norm, prototypes.transpose(0, 1))
+        assign_probs = torch.softmax(assign_logits, dim=-1)
+        assign_entropy = self.normalized_entropy(assign_probs, dim=-1)
+
+        if self.intent_prototypes > 1:
+            top2_vals = assign_probs.topk(k=2, dim=-1).values
+            separation_gap = top2_vals[..., 0] - top2_vals[..., 1]
+        else:
+            separation_gap = torch.ones_like(assign_entropy)
+
+        prototype_uncertainty = 0.5 * assign_entropy + 0.5 * (
+            1.0 - separation_gap)
+        return prototype_uncertainty.clamp(0.0, 1.0), assign_probs
+
     def compute_intent_state(self, all_his_emb, all_his_mask):
         mu = self.intent_mean_proj(all_his_emb)
-        logvar = self.intent_logvar_proj(all_his_emb).clamp(min=-6.0,
-                                                            max=2.0)
+        raw_logvar = self.intent_logvar_proj(all_his_emb)
+        prototype_uncertainty, assign_probs = self.compute_prototype_uncertainty(
+            all_his_emb)
+        prototype_entropy = self.normalized_entropy(assign_probs, dim=-1)
+        if self.intent_prototypes > 1:
+            top2_vals = assign_probs.topk(k=2, dim=-1).values
+            prototype_gap = top2_vals[..., 0] - top2_vals[..., 1]
+        else:
+            prototype_gap = torch.ones_like(prototype_entropy)
+        structural_logvar = torch.log(prototype_uncertainty.unsqueeze(-1).clamp_min(
+            1e-4))
+        logvar = raw_logvar + self.prototype_uncertainty_weight * structural_logvar
+        logvar = logvar.clamp(min=-6.0, max=2.0)
         mu = mu.masked_fill(all_his_mask.unsqueeze(-1), 0.0)
         logvar = logvar.masked_fill(all_his_mask.unsqueeze(-1), 0.0)
         sigma = torch.exp(0.5 * logvar)
-        return mu, logvar, sigma
+        prototype_entropy = prototype_entropy.masked_fill(all_his_mask, 0.0)
+        prototype_gap = prototype_gap.masked_fill(all_his_mask, 0.0)
+        return mu, logvar, sigma, prototype_entropy, prototype_gap
 
     def compute_intent_separation_loss(self, mu, logvar):
         valid_mask = ~(mu.abs().sum(dim=-1) == 0)
@@ -530,7 +568,7 @@ class UniSAR(BaseModel):
         src2rec, rec2src = self.split_rec_src(global_encoded, all_his_type)
         rec_his_ids, src_his_ids = self.split_rec_src_ids(all_his, all_his_type)
         src_proxy_item_ids = self.get_src_proxy_item_ids(src_his_ids)
-        all_mu, all_logvar, all_sigma = self.compute_intent_state(
+        all_mu, all_logvar, all_sigma, prototype_entropy, prototype_gap = self.compute_intent_state(
             global_encoded, all_his_mask)
         rec_mu, src_mu = self.split_rec_src(all_mu, all_his_type)
         rec_logvar, src_logvar = self.split_rec_src(all_logvar, all_his_type)
@@ -563,6 +601,10 @@ class UniSAR(BaseModel):
             self.safe_masked_mean(all_sigma, ~all_his_mask.unsqueeze(-1)),
             'uncertainty_std':
             self.safe_masked_std(all_sigma, ~all_his_mask.unsqueeze(-1)),
+            'prototype_entropy_mean':
+            self.safe_masked_mean(prototype_entropy, ~all_his_mask),
+            'prototype_gap_mean':
+            self.safe_masked_mean(prototype_gap, ~all_his_mask),
             'cf_mask_mean':
             torch.tensor(0.0, device=all_his.device),
             'cf_necessity_mean':
@@ -760,6 +802,10 @@ class UniSAR(BaseModel):
         loss_dict['uncertainty_mean'] = regularization[
             'uncertainty_mean'].clone()
         loss_dict['uncertainty_std'] = regularization['uncertainty_std'].clone()
+        loss_dict['prototype_entropy_mean'] = regularization[
+            'prototype_entropy_mean'].clone()
+        loss_dict['prototype_gap_mean'] = regularization[
+            'prototype_gap_mean'].clone()
         loss_dict['cf_mask_mean'] = regularization['cf_mask_mean'].clone()
         loss_dict['cf_necessity_mean'] = regularization[
             'cf_necessity_mean'].clone()
@@ -874,6 +920,10 @@ class UniSAR(BaseModel):
         loss_dict['uncertainty_mean'] = regularization[
             'uncertainty_mean'].clone()
         loss_dict['uncertainty_std'] = regularization['uncertainty_std'].clone()
+        loss_dict['prototype_entropy_mean'] = regularization[
+            'prototype_entropy_mean'].clone()
+        loss_dict['prototype_gap_mean'] = regularization[
+            'prototype_gap_mean'].clone()
         loss_dict['cf_mask_mean'] = regularization['cf_mask_mean'].clone()
         loss_dict['cf_necessity_mean'] = regularization[
             'cf_necessity_mean'].clone()
