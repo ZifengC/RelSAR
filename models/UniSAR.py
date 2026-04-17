@@ -598,6 +598,14 @@ class UniSAR(BaseModel):
             torch.tensor(0.0, device=all_his.device),
             'path_s2r':
             torch.tensor(0.0, device=all_his.device),
+            'rec_same_delta_mean':
+            torch.tensor(0.0, device=all_his.device),
+            'rec_cross_delta_mean':
+            torch.tensor(0.0, device=all_his.device),
+            'src_same_delta_mean':
+            torch.tensor(0.0, device=all_his.device),
+            'src_cross_delta_mean':
+            torch.tensor(0.0, device=all_his.device),
             'attention_peak':
             torch.tensor(0.0, device=all_his.device)
         }
@@ -731,6 +739,10 @@ class UniSAR(BaseModel):
             rec_full_pred, rec_wo_cross_pred, rec_wo_same_pred)
         src_same_gate, src_cross_gate, src_gate_probs = self.compute_counterfactual_gates(
             src_full_pred, src_wo_cross_pred, src_wo_same_pred)
+        rec_same_delta = F.relu(rec_full_pred - rec_wo_same_pred).squeeze(-1)
+        rec_cross_delta = F.relu(rec_full_pred - rec_wo_cross_pred).squeeze(-1)
+        src_same_delta = F.relu(src_full_pred - src_wo_same_pred).squeeze(-1)
+        src_cross_delta = F.relu(src_full_pred - src_wo_cross_pred).squeeze(-1)
 
         rec_fusion_decoded, rec_attention_peak = self.apply_intent_attention(
             query_seq=rec2rec,
@@ -796,6 +808,10 @@ class UniSAR(BaseModel):
         regularization['path_r2s'] = path_strengths[:, 1].mean()
         regularization['path_r2r'] = path_strengths[:, 2].mean()
         regularization['path_s2r'] = path_strengths[:, 3].mean()
+        regularization['rec_same_delta_mean'] = rec_same_delta.mean()
+        regularization['rec_cross_delta_mean'] = rec_cross_delta.mean()
+        regularization['src_same_delta_mean'] = src_same_delta.mean()
+        regularization['src_cross_delta_mean'] = src_cross_delta.mean()
         regularization['attention_peak'] = 0.5 * (
             rec_attention_peak + src_attention_peak)
 
@@ -910,6 +926,14 @@ class UniSAR(BaseModel):
         loss_dict['path_r2s'] = regularization['path_r2s'].clone()
         loss_dict['path_r2r'] = regularization['path_r2r'].clone()
         loss_dict['path_s2r'] = regularization['path_s2r'].clone()
+        loss_dict['rec_same_delta_mean'] = regularization[
+            'rec_same_delta_mean'].clone()
+        loss_dict['rec_cross_delta_mean'] = regularization[
+            'rec_cross_delta_mean'].clone()
+        loss_dict['src_same_delta_mean'] = regularization[
+            'src_same_delta_mean'].clone()
+        loss_dict['src_cross_delta_mean'] = regularization[
+            'src_cross_delta_mean'].clone()
         loss_dict['attention_peak'] = regularization['attention_peak'].clone()
         total_loss += self.uncertainty_reg_weight * regularization[
             'uncertainty_reg']
@@ -1028,6 +1052,14 @@ class UniSAR(BaseModel):
         loss_dict['path_r2s'] = regularization['path_r2s'].clone()
         loss_dict['path_r2r'] = regularization['path_r2r'].clone()
         loss_dict['path_s2r'] = regularization['path_s2r'].clone()
+        loss_dict['rec_same_delta_mean'] = regularization[
+            'rec_same_delta_mean'].clone()
+        loss_dict['rec_cross_delta_mean'] = regularization[
+            'rec_cross_delta_mean'].clone()
+        loss_dict['src_same_delta_mean'] = regularization[
+            'src_same_delta_mean'].clone()
+        loss_dict['src_cross_delta_mean'] = regularization[
+            'src_cross_delta_mean'].clone()
         loss_dict['attention_peak'] = regularization['attention_peak'].clone()
         total_loss += self.uncertainty_reg_weight * regularization[
             'uncertainty_reg']

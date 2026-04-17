@@ -463,7 +463,9 @@ class SarRunner(BaseRunner):
             'intent_mu_norm', 'uncertainty_mean', 'uncertainty_std',
             'prototype_entropy_mean', 'prototype_gap_mean', 'cf_mask_mean',
             'cf_necessity_mean', 'cf_potential_mean', 'cf_self_mean',
-            'path_s2s', 'path_r2s', 'path_r2r', 'path_s2r', 'attention_peak'
+            'path_s2s', 'path_r2s', 'path_r2r', 'path_s2r',
+            'rec_same_delta_mean', 'rec_cross_delta_mean',
+            'src_same_delta_mean', 'src_cross_delta_mean', 'attention_peak'
         ]
         rec_diag = " ".join([
             "{}:{:.4f}".format(k, np.mean(loss_dict['rec'][k]).item())
