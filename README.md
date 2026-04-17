@@ -1,49 +1,64 @@
-# UniSAR: Modeling User Transition Behaviors between Search and Recommendation
-This is the official implementation of the paper "UniSAR: Modeling User Transition Behaviors between Search and Recommendation" based on PyTorch.
+# RelSAR
 
+Minimal run instructions.
 
-## Overview
+## 1. Install
 
-The main implementation of UniSAR can be found in the file `models/UniSAR.py`. 
+```bash
+pip install -r requirements.txt
+```
 
+## 2. Prepare data
 
-## Experimental Setting
-All the hyper-parameter settings of UniSAR on both datasets can be found in files `config/UniSAR_KuaiSAR.yaml` and `config/UniSAR_Amazon.yaml`.
-The settings of two datasets can be found in file `utils/const.py`.
+Put the processed dataset under `data/`.
 
+The code currently supports:
+- `KuaiSAR`
+- `Amazon`
 
-## Quick Start
+## 3. Optional: build a static item graph
 
-### 1. Download data
-Download and unzip the processed data [Amazon](https://drive.google.com/file/d/1_YHVR7MfS9iJtcdmY75riNCZFY39fFLh/view?usp=drive_link) and [KuaiSAR](https://drive.google.com/file/d/1AgCl3Jd7UxJjGCOvUfx1Yf3SODUpyXiT/view?usp=drive_link). Place data files in the folder `data`.
+```bash
+python3 utils/build_item_graph.py --data KuaiSAR --topk 16 --output data/item_graph_topk.pt
+```
 
-### 2. Satisfy the requirements
-The requirements can be found in file `requirements.txt`.
+This prints a progress bar while building the graph.
 
-### 3. Train and evaluate our model:
-Run codes in command line:
+## 4. Train
+
+Without item graph:
+
 ```bash
 python3 main.py --model UniSAR --data KuaiSAR
 ```
 
-### 3.1 Build a static top-k item graph
-If you want a reusable static item graph for path-aware attention, run:
-```bash
-python3 utils/build_item_graph.py --data KuaiSAR --topk 16 --output data/item_graph_topk.pt
-```
-The builder prints progress bars for user traversal and top-k pruning. Then pass the graph path at training time:
+With item graph:
+
 ```bash
 python3 main.py --model UniSAR --data KuaiSAR --item_graph_path data/item_graph_topk.pt
 ```
 
-### 4. Check training and evaluation process:
-After training, check log files, for example, `output/KuaiSAR/logs/time.log`.
+Use CPU only:
 
+```bash
+python3 main.py --model UniSAR --data KuaiSAR --gpu cpu
+```
 
-## Environments
+## 5. Test
 
-We conducted the experiments based on the following environments:
-* CUDA Version: 11.4
-* OS: CentOS Linux release 7.4.1708 (Core)
-* GPU: The NVIDIA® 3090 GPU
-* CPU: Intel(R) Xeon(R) Gold 6230R CPU @ 2.10GHz
+```bash
+python3 main.py --model UniSAR --data KuaiSAR --train 0 --test_path output/KuaiSAR/UniSAR/checkpoints/<run_name>/best.pt
+```
+
+## 6. Logs
+
+Training logs are written to:
+
+```text
+output/<DATA>/<MODEL>/logs/<TIME>.log
+```
+
+The log includes:
+- training loss
+- validation/test results
+- epoch-level diagnostics for uncertainty, counterfactual gate, and path strength

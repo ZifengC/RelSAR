@@ -29,14 +29,14 @@ class UniSAR(BaseModel):
                             default=[200, 80, 1])
         parser.add_argument('--intent_temp', type=float, default=0.7)
         parser.add_argument('--item_graph_path', type=str, default='')
-        parser.add_argument('--uncertainty_reg_weight', type=float, default=0.001)
-        parser.add_argument('--cf_sparsity_weight', type=float, default=0.001)
+        parser.add_argument('--uncertainty_reg_weight', type=float, default=0.0001)
+        parser.add_argument('--cf_sparsity_weight', type=float, default=0.0001)
         parser.add_argument('--path_competition_weight',
                             type=float,
-                            default=0.001)
+                            default=0.0)
         parser.add_argument('--intent_separation_weight',
                             type=float,
-                            default=0.001)
+                            default=0.0)
         parser.add_argument('--intent_separation_margin',
                             type=float,
                             default=0.2)
