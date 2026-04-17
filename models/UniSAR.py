@@ -422,26 +422,11 @@ class UniSAR(BaseModel):
         denom = weights.sum(dim=1).clamp_min(1.0)
         return (values * weights).sum(dim=1) / denom
 
-    def build_counterfactual_features(self, tokens, target_emb, token_mu,
-                                      token_sigma):
-        expanded_target = target_emb.unsqueeze(1).expand(-1, tokens.size(1), -1)
-        return torch.cat([
-            tokens, expanded_target, torch.abs(tokens - expanded_target),
-            token_mu, token_sigma
-        ],
-                         dim=-1)
-
-    def apply_path_aware_attention(self, query_seq, same_seq, cross_seq,
-                                   same_mask, cross_mask, same_item_ids,
-                                   cross_item_ids, target_emb, target_item_ids,
-                                   same_mu, same_sigma, cross_mu, cross_sigma,
-                                   target_domain):
-        assert target_domain in ['rec', 'src']
-        if target_domain == 'rec':
-            same_path_idx, cross_path_idx = 2, 3
-        else:
-            same_path_idx, cross_path_idx = 0, 1
-
+    def apply_intent_attention(self, query_seq, same_seq, cross_seq, same_mask,
+                               cross_mask, same_item_ids, cross_item_ids,
+                               target_emb, target_item_ids, same_mu,
+                               same_sigma, cross_mu, cross_sigma, same_gate,
+                               cross_gate):
         token_bank = torch.cat([same_seq, cross_seq], dim=1)
         token_mask = torch.cat([same_mask, cross_mask], dim=1)
         token_item_ids = torch.cat([same_item_ids, cross_item_ids], dim=1)
@@ -455,35 +440,6 @@ class UniSAR(BaseModel):
         raw_logits = torch.matmul(query_proj,
                                   key_proj.transpose(-1, -2)) / math.sqrt(
                                       query_proj.size(-1))
-
-        token_cf_feat = self.build_counterfactual_features(
-            token_bank, target_emb, token_mu, token_sigma)
-        base_mask = torch.sigmoid(self.token_mask_gate(token_cf_feat)).squeeze(-1)
-        necessity = torch.sigmoid(
-            self.necessity_gate(token_cf_feat)).squeeze(-1) * base_mask
-        potential = torch.sigmoid(
-            self.potential_gate(token_cf_feat)).squeeze(-1) * (1.0 - base_mask)
-        self_strength = torch.sigmoid(
-            self.self_path_gate(token_cf_feat)).squeeze(-1) * base_mask
-
-        path_strengths = token_bank.new_zeros((token_bank.size(0), 4))
-        path_strengths[:, same_path_idx] = self.masked_path_mean(
-            self_strength[:, :same_seq.size(1)], same_mask)
-        if target_domain == 'rec':
-            cross_score = self.masked_path_mean(necessity[:, same_seq.size(1):],
-                                                cross_mask)
-        else:
-            cross_score = self.masked_path_mean(potential[:, same_seq.size(1):],
-                                                cross_mask)
-        path_strengths[:, cross_path_idx] = cross_score
-
-        same_path_gate = path_strengths[:, same_path_idx].unsqueeze(1).unsqueeze(2)
-        cross_path_gate = path_strengths[:, cross_path_idx].unsqueeze(1).unsqueeze(2)
-        token_path_gate = torch.cat([
-            same_path_gate.expand(-1, 1, same_seq.size(1)),
-            cross_path_gate.expand(-1, 1, cross_seq.size(1))
-        ],
-                                    dim=-1)
 
         token_intent = self.intent_token_proj(token_bank)
         target_intent = self.intent_target_proj(target_emb).unsqueeze(1)
@@ -501,8 +457,16 @@ class UniSAR(BaseModel):
         graph_prior = self.get_graph_prior(target_item_ids, token_item_ids)
         graph_prior = graph_prior.unsqueeze(1)
 
+        same_gate = same_gate.clamp_min(1e-8).unsqueeze(1).unsqueeze(2)
+        cross_gate = cross_gate.clamp_min(1e-8).unsqueeze(1).unsqueeze(2)
+        token_path_gate = torch.cat([
+            same_gate.expand(-1, 1, same_seq.size(1)),
+            cross_gate.expand(-1, 1, cross_seq.size(1))
+        ],
+                                    dim=-1)
+
         attn_logits = raw_logits + intent_match_logits
-        attn_logits = attn_logits + torch.log(token_path_gate.clamp_min(1e-8))
+        attn_logits = attn_logits + torch.log(token_path_gate)
         attn_logits = attn_logits + torch.log(graph_prior.clamp_min(1e-8))
         attn_logits = attn_logits.masked_fill(token_mask.unsqueeze(1), -1e16)
 
@@ -510,31 +474,44 @@ class UniSAR(BaseModel):
         attended = torch.matmul(attn_probs, value_proj)
         output = F.layer_norm(attended + query_seq, (query_seq.size(-1), ))
         output = output.masked_fill(same_mask.unsqueeze(-1), 0.0)
-
-        cf_entropy = -(base_mask.clamp_min(1e-8) * base_mask.clamp_min(1e-8).log() +
-                       (1.0 - base_mask).clamp_min(1e-8) *
-                       (1.0 - base_mask).clamp_min(1e-8).log())
-        valid_token_mask = ~token_mask
-        valid_token_count = valid_token_mask.sum().clamp_min(1)
+        valid_token_count = (~same_mask).sum().clamp_min(1)
         attention_peak = attn_probs.max(dim=-1).values.masked_fill(
-            same_mask, 0.0)
-        reg_dict = {
-            'cf_sparsity_reg':
-            base_mask.mean() + cf_entropy.mean(),
-            'path_strengths':
-            path_strengths,
-            'cf_mask_mean':
-            base_mask.mean(),
-            'cf_necessity_mean':
-            necessity.mean(),
-            'cf_potential_mean':
-            potential.mean(),
-            'cf_self_mean':
-            self_strength.mean(),
-            'attention_peak':
-            attention_peak.sum() / valid_token_count
+            same_mask, 0.0).sum() / valid_token_count
+        return output, attention_peak
+
+    def apply_path_aware_attention(self, query_seq, same_seq, cross_seq,
+                                   same_mask, cross_mask, same_item_ids,
+                                   cross_item_ids, target_emb, target_item_ids,
+                                   same_mu, same_sigma, cross_mu, cross_sigma,
+                                   target_domain):
+        ones = query_seq.new_ones(query_seq.size(0))
+        zeros = query_seq.new_zeros(query_seq.size(0))
+
+        same_only_output, _ = self.apply_intent_attention(
+            query_seq, same_seq, cross_seq, same_mask, cross_mask,
+            same_item_ids, cross_item_ids, target_emb, target_item_ids, same_mu,
+            same_sigma, cross_mu, cross_sigma, ones, zeros)
+        cross_only_output, _ = self.apply_intent_attention(
+            query_seq, same_seq, cross_seq, same_mask, cross_mask,
+            same_item_ids, cross_item_ids, target_emb, target_item_ids, same_mu,
+            same_sigma, cross_mu, cross_sigma, zeros, ones)
+        full_output, _ = self.apply_intent_attention(
+            query_seq, same_seq, cross_seq, same_mask, cross_mask,
+            same_item_ids, cross_item_ids, target_emb, target_item_ids, same_mu,
+            same_sigma, cross_mu, cross_sigma, ones, ones)
+        return {
+            'same_only': same_only_output,
+            'cross_only': cross_only_output,
+            'full': full_output
         }
-        return output, reg_dict
+
+    def compute_counterfactual_gates(self, full_pred, wo_cross_pred,
+                                     wo_same_pred):
+        cross_delta = F.relu(full_pred - wo_cross_pred).squeeze(-1)
+        same_delta = F.relu(full_pred - wo_same_pred).squeeze(-1)
+        gate_logits = torch.stack([same_delta, cross_delta], dim=-1)
+        gate_probs = torch.softmax(gate_logits, dim=-1)
+        return gate_probs[:, 0], gate_probs[:, 1], gate_probs
 
     def forward(self,
                 user,
@@ -650,12 +627,12 @@ class UniSAR(BaseModel):
         rec_target_item_ids = items.reshape(-1)
         src_target_item_ids = items.reshape(-1) if domain == 'rec' else None
 
-        rec_fusion_decoded, rec_reg = self.apply_path_aware_attention(
+        rec_outputs = self.apply_path_aware_attention(
             query_seq=rec2rec,
             same_seq=rec2rec,
             cross_seq=src2rec,
             same_mask=rec_his_mask,
-            cross_mask=rec_his_mask,
+            cross_mask=src_his_mask,
             same_item_ids=rec_his_ids,
             cross_item_ids=src_proxy_item_ids,
             target_emb=attention_target_emb,
@@ -666,12 +643,12 @@ class UniSAR(BaseModel):
             cross_sigma=src_sigma,
             target_domain='rec')
 
-        src_fusion_decoded, src_reg = self.apply_path_aware_attention(
+        src_outputs = self.apply_path_aware_attention(
             query_seq=src2src,
             same_seq=src2src,
             cross_seq=rec2src,
             same_mask=src_his_mask,
-            cross_mask=src_his_mask,
+            cross_mask=rec_his_mask,
             same_item_ids=src_proxy_item_ids,
             cross_item_ids=rec_his_ids,
             target_emb=attention_target_emb,
@@ -682,28 +659,145 @@ class UniSAR(BaseModel):
             cross_sigma=rec_sigma,
             target_domain='src')
 
-        path_strengths = rec_reg['path_strengths'] + src_reg['path_strengths']
+        rec_same_only = self.rec_his_attn_pooling(rec_outputs['same_only'],
+                                                  flat_items_emb, rec_his_mask)
+        rec_cross_only = self.rec_his_attn_pooling(rec_outputs['cross_only'],
+                                                   flat_items_emb, rec_his_mask)
+        rec_full = self.rec_his_attn_pooling(rec_outputs['full'], flat_items_emb,
+                                             rec_his_mask)
+        src_same_only = self.src_his_attn_pooling(src_outputs['same_only'],
+                                                  flat_items_emb, src_his_mask)
+        src_cross_only = self.src_his_attn_pooling(src_outputs['cross_only'],
+                                                   flat_items_emb, src_his_mask)
+        src_full = self.src_his_attn_pooling(src_outputs['full'], flat_items_emb,
+                                             src_his_mask)
+
+        if domain == 'rec':
+            rec_full_pred = self.inter_pred([rec_full, src_full, user_emb],
+                                            flat_items_emb,
+                                            domain='rec')
+            rec_wo_cross_pred = self.inter_pred(
+                [rec_same_only, src_full, user_emb],
+                flat_items_emb,
+                domain='rec')
+            rec_wo_same_pred = self.inter_pred(
+                [rec_cross_only, src_full, user_emb],
+                flat_items_emb,
+                domain='rec')
+
+            src_full_pred = self.inter_pred([rec_full, src_full, user_emb],
+                                            flat_items_emb,
+                                            domain='rec')
+            src_wo_cross_pred = self.inter_pred(
+                [rec_full, src_same_only, user_emb],
+                flat_items_emb,
+                domain='rec')
+            src_wo_same_pred = self.inter_pred(
+                [rec_full, src_cross_only, user_emb],
+                flat_items_emb,
+                domain='rec')
+        else:
+            rec_full_pred = self.inter_pred([rec_full, src_full, user_emb],
+                                            flat_items_emb,
+                                            domain='src',
+                                            query_emb=repeated_query_emb)
+            rec_wo_cross_pred = self.inter_pred(
+                [rec_same_only, src_full, user_emb],
+                flat_items_emb,
+                domain='src',
+                query_emb=repeated_query_emb)
+            rec_wo_same_pred = self.inter_pred(
+                [rec_cross_only, src_full, user_emb],
+                flat_items_emb,
+                domain='src',
+                query_emb=repeated_query_emb)
+
+            src_full_pred = self.inter_pred([rec_full, src_full, user_emb],
+                                            flat_items_emb,
+                                            domain='src',
+                                            query_emb=repeated_query_emb)
+            src_wo_cross_pred = self.inter_pred(
+                [rec_full, src_same_only, user_emb],
+                flat_items_emb,
+                domain='src',
+                query_emb=repeated_query_emb)
+            src_wo_same_pred = self.inter_pred(
+                [rec_full, src_cross_only, user_emb],
+                flat_items_emb,
+                domain='src',
+                query_emb=repeated_query_emb)
+
+        rec_same_gate, rec_cross_gate, rec_gate_probs = self.compute_counterfactual_gates(
+            rec_full_pred, rec_wo_cross_pred, rec_wo_same_pred)
+        src_same_gate, src_cross_gate, src_gate_probs = self.compute_counterfactual_gates(
+            src_full_pred, src_wo_cross_pred, src_wo_same_pred)
+
+        rec_fusion_decoded, rec_attention_peak = self.apply_intent_attention(
+            query_seq=rec2rec,
+            same_seq=rec2rec,
+            cross_seq=src2rec,
+            same_mask=rec_his_mask,
+            cross_mask=src_his_mask,
+            same_item_ids=rec_his_ids,
+            cross_item_ids=src_proxy_item_ids,
+            target_emb=attention_target_emb,
+            target_item_ids=rec_target_item_ids,
+            same_mu=rec_mu,
+            same_sigma=rec_sigma,
+            cross_mu=src_mu,
+            cross_sigma=src_sigma,
+            same_gate=rec_same_gate,
+            cross_gate=rec_cross_gate)
+
+        src_fusion_decoded, src_attention_peak = self.apply_intent_attention(
+            query_seq=src2src,
+            same_seq=src2src,
+            cross_seq=rec2src,
+            same_mask=src_his_mask,
+            cross_mask=rec_his_mask,
+            same_item_ids=src_proxy_item_ids,
+            cross_item_ids=rec_his_ids,
+            target_emb=attention_target_emb,
+            target_item_ids=src_target_item_ids,
+            same_mu=src_mu,
+            same_sigma=src_sigma,
+            cross_mu=rec_mu,
+            cross_sigma=rec_sigma,
+            same_gate=src_same_gate,
+            cross_gate=src_cross_gate)
+
+        path_strengths = all_his.new_zeros((rec_same_gate.size(0), 4),
+                                           dtype=rec_same_gate.dtype,
+                                           device=rec_same_gate.device)
+        path_strengths[:, 0] = src_same_gate
+        path_strengths[:, 1] = src_cross_gate
+        path_strengths[:, 2] = rec_same_gate
+        path_strengths[:, 3] = rec_cross_gate
         path_dist = path_strengths / path_strengths.sum(dim=-1,
                                                         keepdim=True).clamp_min(1e-8)
-        regularization['cf_sparsity_reg'] = 0.5 * (
-            rec_reg['cf_sparsity_reg'] + src_reg['cf_sparsity_reg'])
+        rec_gate_entropy = -(rec_gate_probs.clamp_min(1e-8) *
+                             rec_gate_probs.clamp_min(1e-8).log()).sum(
+                                 dim=-1).mean()
+        src_gate_entropy = -(src_gate_probs.clamp_min(1e-8) *
+                             src_gate_probs.clamp_min(1e-8).log()).sum(
+                                 dim=-1).mean()
+        regularization['cf_sparsity_reg'] = 0.5 * (rec_gate_entropy +
+                                                   src_gate_entropy)
         regularization['path_competition_reg'] = -(
             path_dist.clamp_min(1e-8) * path_dist.clamp_min(1e-8).log()
         ).sum(dim=-1).mean()
         regularization['cf_mask_mean'] = 0.5 * (
-            rec_reg['cf_mask_mean'] + src_reg['cf_mask_mean'])
-        regularization['cf_necessity_mean'] = 0.5 * (
-            rec_reg['cf_necessity_mean'] + src_reg['cf_necessity_mean'])
-        regularization['cf_potential_mean'] = 0.5 * (
-            rec_reg['cf_potential_mean'] + src_reg['cf_potential_mean'])
+            rec_cross_gate.mean() + src_cross_gate.mean())
+        regularization['cf_necessity_mean'] = rec_cross_gate.mean()
+        regularization['cf_potential_mean'] = src_cross_gate.mean()
         regularization['cf_self_mean'] = 0.5 * (
-            rec_reg['cf_self_mean'] + src_reg['cf_self_mean'])
+            rec_same_gate.mean() + src_same_gate.mean())
         regularization['path_s2s'] = path_strengths[:, 0].mean()
         regularization['path_r2s'] = path_strengths[:, 1].mean()
         regularization['path_r2r'] = path_strengths[:, 2].mean()
         regularization['path_s2r'] = path_strengths[:, 3].mean()
         regularization['attention_peak'] = 0.5 * (
-            rec_reg['attention_peak'] + src_reg['attention_peak'])
+            rec_attention_peak + src_attention_peak)
 
         rec_fusion = self.rec_his_attn_pooling(rec_fusion_decoded, flat_items_emb,
                                                rec_his_mask)
