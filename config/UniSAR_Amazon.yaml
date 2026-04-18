@@ -20,8 +20,8 @@ his_cl_weight: 0.01
 pred_hid_units: [200, 80, 1]
 
 intent_temp: 0.7
-intent_prototypes: 8
-prototype_uncertainty_weight: 0.5
+cf_gate_scale: 10.0
+cf_consistency_weight: 0.01
 item_graph_path: ''
 uncertainty_reg_weight: 0.0001
 cf_sparsity_weight: 0.0001
