@@ -481,6 +481,13 @@ class UniSAR(BaseModel):
         gate_probs = torch.softmax(gate_logits, dim=-1)
         return gate_probs[:, 0], gate_probs[:, 1], gate_probs
 
+    def compute_cross_supplement_gates(self, full_pred, wo_cross_pred):
+        cross_delta = F.relu(full_pred - wo_cross_pred).squeeze(-1)
+        cross_gate = torch.sigmoid(self.cf_gate_scale * cross_delta)
+        same_gate = torch.ones_like(cross_gate)
+        gate_probs = torch.stack([1.0 - cross_gate, cross_gate], dim=-1)
+        return same_gate, cross_gate, gate_probs
+
     def forward(self,
                 user,
                 all_his,
@@ -571,6 +578,10 @@ class UniSAR(BaseModel):
             'src_same_delta_mean':
             torch.tensor(0.0, device=all_his.device),
             'src_cross_delta_mean':
+            torch.tensor(0.0, device=all_his.device),
+            'rec_cross_gate_mean':
+            torch.tensor(0.0, device=all_his.device),
+            'src_cross_gate_mean':
             torch.tensor(0.0, device=all_his.device),
             'attention_peak':
             torch.tensor(0.0, device=all_his.device)
@@ -701,8 +712,8 @@ class UniSAR(BaseModel):
                 domain='src',
                 query_emb=repeated_query_emb)
 
-        rec_same_gate, rec_cross_gate, rec_gate_probs = self.compute_counterfactual_gates(
-            rec_full_pred, rec_wo_cross_pred, rec_wo_same_pred)
+        rec_same_gate, rec_cross_gate, rec_gate_probs = self.compute_cross_supplement_gates(
+            rec_full_pred, rec_wo_cross_pred)
         src_same_gate, src_cross_gate, src_gate_probs = self.compute_counterfactual_gates(
             src_full_pred, src_wo_cross_pred, src_wo_same_pred)
         rec_same_delta = F.relu(rec_full_pred - rec_wo_same_pred).squeeze(-1)
@@ -784,13 +795,14 @@ class UniSAR(BaseModel):
         regularization['rec_cross_delta_mean'] = rec_cross_delta.mean()
         regularization['src_same_delta_mean'] = src_same_delta.mean()
         regularization['src_cross_delta_mean'] = src_cross_delta.mean()
+        regularization['rec_cross_gate_mean'] = rec_cross_gate.mean()
+        regularization['src_cross_gate_mean'] = src_cross_gate.mean()
         regularization['cf_consistency_reg'] = 0.5 * (rec_consistency +
                                                       src_consistency)
         regularization['attention_peak'] = 0.5 * (
             rec_attention_peak + src_attention_peak)
 
-        rec_fusion = self.rec_his_attn_pooling(rec_fusion_decoded, flat_items_emb,
-                                               rec_his_mask)
+        rec_fusion = rec_same_only + rec_cross_gate.unsqueeze(-1) * rec_cross_only
         src_fusion = self.src_his_attn_pooling(src_fusion_decoded, flat_items_emb,
                                                src_his_mask)
 
@@ -906,6 +918,10 @@ class UniSAR(BaseModel):
             'src_same_delta_mean'].clone()
         loss_dict['src_cross_delta_mean'] = regularization[
             'src_cross_delta_mean'].clone()
+        loss_dict['rec_cross_gate_mean'] = regularization[
+            'rec_cross_gate_mean'].clone()
+        loss_dict['src_cross_gate_mean'] = regularization[
+            'src_cross_gate_mean'].clone()
         loss_dict['attention_peak'] = regularization['attention_peak'].clone()
         total_loss += self.uncertainty_reg_weight * regularization[
             'uncertainty_reg']
@@ -1032,6 +1048,10 @@ class UniSAR(BaseModel):
             'src_same_delta_mean'].clone()
         loss_dict['src_cross_delta_mean'] = regularization[
             'src_cross_delta_mean'].clone()
+        loss_dict['rec_cross_gate_mean'] = regularization[
+            'rec_cross_gate_mean'].clone()
+        loss_dict['src_cross_gate_mean'] = regularization[
+            'src_cross_gate_mean'].clone()
         loss_dict['attention_peak'] = regularization['attention_peak'].clone()
         total_loss += self.uncertainty_reg_weight * regularization[
             'uncertainty_reg']

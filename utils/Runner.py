@@ -465,6 +465,7 @@ class SarRunner(BaseRunner):
             'cf_self_mean', 'path_s2s', 'path_r2s', 'path_r2r', 'path_s2r',
             'rec_same_delta_mean', 'rec_cross_delta_mean',
             'src_same_delta_mean', 'src_cross_delta_mean',
+            'rec_cross_gate_mean', 'src_cross_gate_mean',
             'cf_consistency_reg', 'attention_peak'
         ]
         rec_diag = " ".join([
