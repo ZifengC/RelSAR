@@ -20,6 +20,7 @@ his_cl_weight: 0.01
 pred_hid_units: [200, 80, 1]
 
 intent_temp: 0.7
+rec_use_src_interest: false
 cf_gate_scale: 10.0
 cf_consistency_weight: 0.01
 item_graph_path: ''

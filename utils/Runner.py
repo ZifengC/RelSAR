@@ -459,31 +459,72 @@ class SarRunner(BaseRunner):
                             for k, v in loss_dict['src'].items()
                         ])))
         logging.info("total time: {:.2f}s".format(time.time() - start))
-        diagnostic_keys = [
-            'intent_mu_norm', 'uncertainty_mean', 'uncertainty_std',
-            'cf_mask_mean', 'cf_necessity_mean', 'cf_potential_mean',
-            'cf_self_mean', 'path_s2s', 'path_r2s', 'path_r2r', 'path_s2r',
-            'rec_same_delta_mean', 'rec_cross_delta_mean',
-            'src_same_delta_mean', 'src_cross_delta_mean',
-            'rec_cross_gate_mean', 'src_cross_gate_mean',
-            'cf_consistency_reg', 'attention_peak'
-        ]
-        rec_diag = " ".join([
-            "{}:{:.4f}".format(k, np.mean(loss_dict['rec'][k]).item())
-            for k in diagnostic_keys if k in loss_dict['rec']
-        ])
-        src_diag = " ".join([
-            "{}:{:.4f}".format(k, np.mean(loss_dict['src'][k]).item())
-            for k in diagnostic_keys if k in loss_dict['src']
-        ])
+        diagnostic_groups = {
+            'intent': [
+                'intent_mu_norm', 'intent_assign_entropy',
+                'intent_usage_max', 'intent_residual_mean',
+                'intent_collapse_reg'
+            ],
+            'transition': [
+                'transition_explore_mean', 'transition_exploit_mean'
+            ],
+            'uncertainty': ['uncertainty_mean', 'uncertainty_std'],
+            'cf': [
+                'cf_mask_mean', 'cf_necessity_mean', 'cf_potential_mean',
+                'cf_self_mean', 'cf_consistency_reg'
+            ],
+            'path': [
+                'path_s2s', 'path_r2s', 'path_r2r', 'path_s2r',
+                'rec_same_delta_mean', 'rec_cross_delta_mean',
+                'src_same_delta_mean', 'src_cross_delta_mean',
+                'rec_cross_gate_mean', 'src_cross_gate_mean'
+            ],
+            'attention': ['attention_peak']
+        }
+
+        def format_group(domain_loss, keys):
+            return " ".join([
+                "{}:{:.4f}".format(k, np.mean(domain_loss[k]).item())
+                for k in keys if k in domain_loss
+            ])
+
+        def format_diagnostics(domain_loss):
+            sections = []
+            for group_name, keys in diagnostic_groups.items():
+                group_text = format_group(domain_loss, keys)
+                if group_text:
+                    sections.append("{}[{}]".format(group_name, group_text))
+            return " ".join(sections)
+
+        rec_diag = format_diagnostics(loss_dict['rec'])
+        src_diag = format_diagnostics(loss_dict['src'])
+
         def build_flags(domain_loss):
             flags = []
             attention_peak = np.mean(domain_loss.get('attention_peak',
                                                      [0.0])).item()
             cf_mask_mean = np.mean(domain_loss.get('cf_mask_mean',
                                                    [0.5])).item()
+            intent_usage_max = np.mean(domain_loss.get('intent_usage_max',
+                                                       [0.0])).item()
+            intent_entropy = np.mean(domain_loss.get('intent_assign_entropy',
+                                                     [1.0])).item()
+            transition_explore = np.mean(
+                domain_loss.get('transition_explore_mean', [0.0])).item()
+            transition_exploit = np.mean(
+                domain_loss.get('transition_exploit_mean', [0.0])).item()
             if attention_peak > getattr(model, 'intent_peak_ceiling', 0.80):
                 flags.append('attention_peaky')
+            if intent_usage_max > 0.70:
+                flags.append('intent_usage_collapse')
+            if intent_entropy < 0.20:
+                flags.append('intent_assignment_low_entropy')
+            if transition_explore > 1.5 * transition_exploit and \
+                    transition_explore > 1e-4:
+                flags.append('transition_explore_dominant')
+            if transition_exploit > 1.5 * transition_explore and \
+                    transition_exploit > 1e-4:
+                flags.append('transition_exploit_dominant')
             if cf_mask_mean < getattr(model, 'cf_mask_floor', 0.05):
                 flags.append('cf_mask_too_small')
             if cf_mask_mean > getattr(model, 'cf_mask_ceiling', 0.95):
