@@ -463,6 +463,7 @@ class SarRunner(BaseRunner):
             'intent': [
                 'intent_mu_norm', 'intent_assign_entropy',
                 'intent_usage_max', 'intent_residual_mean',
+                'intent_proto_sim_mean', 'intent_proto_sim_max',
                 'intent_collapse_reg'
             ],
             'transition': [
@@ -479,7 +480,9 @@ class SarRunner(BaseRunner):
                 'src_same_delta_mean', 'src_cross_delta_mean',
                 'rec_cross_gate_mean', 'src_cross_gate_mean'
             ],
-            'attention': ['attention_peak']
+            'attention': [
+                'attention_peak', 'attention_temp_mean', 'attention_temp_std'
+            ]
         }
 
         def format_group(domain_loss, keys):
@@ -509,6 +512,8 @@ class SarRunner(BaseRunner):
                                                        [0.0])).item()
             intent_entropy = np.mean(domain_loss.get('intent_assign_entropy',
                                                      [1.0])).item()
+            intent_proto_sim_max = np.mean(
+                domain_loss.get('intent_proto_sim_max', [0.0])).item()
             transition_explore = np.mean(
                 domain_loss.get('transition_explore_mean', [0.0])).item()
             transition_exploit = np.mean(
@@ -519,6 +524,8 @@ class SarRunner(BaseRunner):
                 flags.append('intent_usage_collapse')
             if intent_entropy < 0.20:
                 flags.append('intent_assignment_low_entropy')
+            if intent_proto_sim_max > 0.80:
+                flags.append('intent_proto_too_similar')
             if transition_explore > 1.5 * transition_exploit and \
                     transition_explore > 1e-4:
                 flags.append('transition_explore_dominant')

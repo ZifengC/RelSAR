@@ -19,8 +19,13 @@ his_cl_weight: 0.01
 
 pred_hid_units: [200, 80, 1]
 
-intent_temp: 0.7
-rec_use_src_interest: false
+intent_temp: 0.5
+explore_temp_scale: 2.0
+exploit_temp_scale: 1.5
+intent_assign_bias_weight: 0.1
+intent_mu_bias_weight: 0.1
+uncertainty_bias_weight: 0.1
+post_intent_attention_weight: 1.0
 cf_gate_scale: 10.0
 cf_consistency_weight: 0.01
 item_graph_path: ''

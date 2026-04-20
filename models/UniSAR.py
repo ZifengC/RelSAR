@@ -27,9 +27,7 @@ class UniSAR(BaseModel):
         parser.add_argument('--pred_hid_units',
                             type=List,
                             default=[200, 80, 1])
-        parser.add_argument('--intent_temp', type=float, default=0.7)
-        parser.add_argument('--rec_use_src_interest', action='store_true',
-                            help='Whether to feed src_interest into rec prediction branch')
+        parser.add_argument('--intent_temp', type=float, default=0.5)
         parser.add_argument('--cf_gate_scale', type=float, default=10.0)
         parser.add_argument('--cf_consistency_weight',
                             type=float,
@@ -57,10 +55,22 @@ class UniSAR(BaseModel):
                             type=float,
                             default=0.2)
         parser.add_argument('--transition_decay', type=float, default=0.2)
-        parser.add_argument('--explore_temp_scale', type=float, default=0.5)
-        parser.add_argument('--exploit_temp_scale', type=float, default=0.3)
+        parser.add_argument('--explore_temp_scale', type=float, default=2.0)
+        parser.add_argument('--exploit_temp_scale', type=float, default=1.5)
         parser.add_argument('--attention_temp_min', type=float, default=0.7)
         parser.add_argument('--attention_temp_max', type=float, default=1.5)
+        parser.add_argument('--intent_assign_bias_weight',
+                            type=float,
+                            default=0.1)
+        parser.add_argument('--intent_mu_bias_weight',
+                            type=float,
+                            default=0.1)
+        parser.add_argument('--uncertainty_bias_weight',
+                            type=float,
+                            default=0.1)
+        parser.add_argument('--post_intent_attention_weight',
+                            type=float,
+                            default=1.0)
         parser.add_argument('--intent_peak_ceiling', type=float, default=0.80)
         parser.add_argument('--cf_mask_floor', type=float, default=0.05)
         parser.add_argument('--cf_mask_ceiling', type=float, default=0.95)
@@ -73,7 +83,6 @@ class UniSAR(BaseModel):
         self.num_heads = args.num_heads
         self.batch_size = args.batch_size
         self.intent_temp = args.intent_temp
-        self.rec_use_src_interest = args.rec_use_src_interest
         self.cf_gate_scale = args.cf_gate_scale
         self.cf_consistency_weight = args.cf_consistency_weight
         self.item_graph_path = args.item_graph_path
@@ -91,6 +100,10 @@ class UniSAR(BaseModel):
         self.exploit_temp_scale = args.exploit_temp_scale
         self.attention_temp_min = args.attention_temp_min
         self.attention_temp_max = args.attention_temp_max
+        self.intent_assign_bias_weight = args.intent_assign_bias_weight
+        self.intent_mu_bias_weight = args.intent_mu_bias_weight
+        self.uncertainty_bias_weight = args.uncertainty_bias_weight
+        self.post_intent_attention_weight = args.post_intent_attention_weight
         self.intent_peak_ceiling = args.intent_peak_ceiling
         self.cf_mask_floor = args.cf_mask_floor
         self.cf_mask_ceiling = args.cf_mask_ceiling
@@ -106,15 +119,36 @@ class UniSAR(BaseModel):
         self.rec_transformer = Transformer(emb_size=self.item_size,
                                            num_heads=self.num_heads,
                                            num_layers=self.num_layers,
-                                           dropout=self.dropout)
+                                           dropout=self.dropout,
+                                           intent_assign_bias_weight=self.intent_assign_bias_weight,
+                                           intent_mu_bias_weight=self.intent_mu_bias_weight,
+                                           uncertainty_bias_weight=self.uncertainty_bias_weight,
+                                           explore_temp_scale=self.explore_temp_scale,
+                                           exploit_temp_scale=self.exploit_temp_scale,
+                                           attention_temp_min=self.attention_temp_min,
+                                           attention_temp_max=self.attention_temp_max)
         self.src_transformer = Transformer(emb_size=self.item_size,
                                            num_heads=self.num_heads,
                                            num_layers=self.num_layers,
-                                           dropout=self.dropout)
+                                           dropout=self.dropout,
+                                           intent_assign_bias_weight=self.intent_assign_bias_weight,
+                                           intent_mu_bias_weight=self.intent_mu_bias_weight,
+                                           uncertainty_bias_weight=self.uncertainty_bias_weight,
+                                           explore_temp_scale=self.explore_temp_scale,
+                                           exploit_temp_scale=self.exploit_temp_scale,
+                                           attention_temp_min=self.attention_temp_min,
+                                           attention_temp_max=self.attention_temp_max)
         self.global_transformer = Transformer(emb_size=self.item_size,
                                               num_heads=self.num_heads,
                                               num_layers=self.num_layers,
-                                              dropout=self.dropout)
+                                              dropout=self.dropout,
+                                              intent_assign_bias_weight=self.intent_assign_bias_weight,
+                                              intent_mu_bias_weight=self.intent_mu_bias_weight,
+                                              uncertainty_bias_weight=self.uncertainty_bias_weight,
+                                              explore_temp_scale=self.explore_temp_scale,
+                                              exploit_temp_scale=self.exploit_temp_scale,
+                                              attention_temp_min=self.attention_temp_min,
+                                              attention_temp_max=self.attention_temp_max)
 
         self.q_i_cl_temp = args.q_i_cl_temp
         self.q_i_cl_weight = args.q_i_cl_weight
@@ -317,9 +351,16 @@ class UniSAR(BaseModel):
         logvar = logvar.masked_fill(all_his_mask.unsqueeze(-1), 0.0)
         sigma = torch.exp(0.5 * logvar)
         valid_mask = ~all_his_mask
+        collapse_reg, proto_sim_mean, proto_sim_max = \
+            self.compute_intent_collapse_diagnostics(intents, assign,
+                                                     valid_mask)
         diagnostics = {
             'intent_collapse_reg':
-            self.compute_intent_collapse_loss(intents, assign, valid_mask),
+            collapse_reg,
+            'intent_proto_sim_mean':
+            proto_sim_mean,
+            'intent_proto_sim_max':
+            proto_sim_max,
             'intent_assign_entropy':
             self.safe_masked_mean(entropy.squeeze(-1), valid_mask),
             'intent_usage_max':
@@ -379,28 +420,32 @@ class UniSAR(BaseModel):
         usage = usage / valid_count.clamp_min(1.0)
         return usage / usage.sum().clamp_min(1e-8)
 
-    def compute_intent_collapse_loss(self, intents, assign, valid_mask):
+    def compute_intent_collapse_diagnostics(self, intents, assign, valid_mask):
         if self.intent_num <= 1:
-            return intents.new_tensor(0.0)
+            zero = intents.new_tensor(0.0)
+            return zero, zero, zero
         norm_intents = F.normalize(intents, dim=-1)
         proto_sim = torch.matmul(norm_intents,
                                  norm_intents.transpose(-1, -2))
         off_diag_mask = ~torch.eye(self.intent_num,
                                    dtype=torch.bool,
                                    device=intents.device).unsqueeze(0)
+        off_diag_sim = proto_sim.masked_select(off_diag_mask)
+        proto_sim_mean = off_diag_sim.mean()
+        proto_sim_max = off_diag_sim.max()
         proto_violation = F.relu(proto_sim - self.intent_diversity_margin)
         proto_loss = proto_violation.masked_select(off_diag_mask).mean()
 
         valid_count = valid_mask.float().sum()
         if valid_count <= 0:
-            return proto_loss
+            return proto_loss, proto_sim_mean, proto_sim_max
         usage = self.compute_intent_usage(assign, valid_mask)
         usage_entropy = -(usage.clamp_min(1e-8) *
                           usage.clamp_min(1e-8).log()).sum()
         if self.intent_num > 1:
             usage_entropy = usage_entropy / math.log(self.intent_num)
         usage_loss = 1.0 - usage_entropy
-        return proto_loss + usage_loss
+        return proto_loss + usage_loss, proto_sim_mean, proto_sim_max
 
     def compute_intent_separation_loss(self, mu, logvar):
         valid_mask = ~(mu.abs().sum(dim=-1) == 0)
@@ -525,6 +570,7 @@ class UniSAR(BaseModel):
         intent_match_logits = intent_match_logits + token_uncertainty.transpose(
             -1, -2) + target_uncertainty.transpose(-1, -2)
         intent_match_logits = intent_match_logits / self.intent_temp
+        intent_match_logits = self.post_intent_attention_weight * intent_match_logits
 
         graph_prior = self.get_graph_prior(target_item_ids, token_item_ids)
         graph_prior = graph_prior.unsqueeze(1)
@@ -554,7 +600,12 @@ class UniSAR(BaseModel):
         valid_token_count = (~same_mask).sum().clamp_min(1)
         attention_peak = attn_probs.max(dim=-1).values.masked_fill(
             same_mask, 0.0).sum() / valid_token_count
-        return output, attention_peak
+        valid_temperature = temperature.squeeze(-1).masked_fill(same_mask, 0.0)
+        temperature_mean = valid_temperature.sum() / valid_token_count
+        temperature_std = temperature.squeeze(-1).masked_select(
+            ~same_mask).std(unbiased=False) if (~same_mask).any() else \
+            temperature.new_tensor(0.0)
+        return output, attention_peak, temperature_mean, temperature_std
 
     def apply_path_aware_attention(self, query_seq, same_seq, cross_seq,
                                    same_mask, cross_mask, same_item_ids,
@@ -565,17 +616,17 @@ class UniSAR(BaseModel):
         ones = query_seq.new_ones(query_seq.size(0))
         zeros = query_seq.new_zeros(query_seq.size(0))
 
-        same_only_output, _ = self.apply_intent_attention(
+        same_only_output, _, _, _ = self.apply_intent_attention(
             query_seq, same_seq, cross_seq, same_mask, cross_mask,
             same_item_ids, cross_item_ids, target_emb, target_item_ids, same_mu,
             same_sigma, cross_mu, cross_sigma, ones, zeros, query_explore,
             query_exploit)
-        cross_only_output, _ = self.apply_intent_attention(
+        cross_only_output, _, _, _ = self.apply_intent_attention(
             query_seq, same_seq, cross_seq, same_mask, cross_mask,
             same_item_ids, cross_item_ids, target_emb, target_item_ids, same_mu,
             same_sigma, cross_mu, cross_sigma, zeros, ones, query_explore,
             query_exploit)
-        full_output, _ = self.apply_intent_attention(
+        full_output, _, _, _ = self.apply_intent_attention(
             query_seq, same_seq, cross_seq, same_mask, cross_mask,
             same_item_ids, cross_item_ids, target_emb, target_item_ids, same_mu,
             same_sigma, cross_mu, cross_sigma, ones, ones, query_explore,
@@ -595,11 +646,15 @@ class UniSAR(BaseModel):
         gate_probs = torch.softmax(gate_logits, dim=-1)
         return gate_probs[:, 0], gate_probs[:, 1], gate_probs
 
-    def compute_cross_supplement_gates(self, full_pred, wo_cross_pred):
+    def compute_cross_supplement_gates(self, full_pred, wo_cross_pred,
+                                       wo_same_pred):
         cross_delta = F.relu(full_pred - wo_cross_pred).squeeze(-1)
-        cross_gate = torch.sigmoid(self.cf_gate_scale * cross_delta)
+        same_delta = F.relu(full_pred - wo_same_pred).squeeze(-1)
+        gate_logits = self.cf_gate_scale * torch.stack([same_delta, cross_delta],
+                                                       dim=-1)
+        gate_probs = torch.softmax(gate_logits, dim=-1)
+        cross_gate = gate_probs[:, 1]
         same_gate = torch.ones_like(cross_gate)
-        gate_probs = torch.stack([1.0 - cross_gate, cross_gate], dim=-1)
         return same_gate, cross_gate, gate_probs
 
     def forward(self,
@@ -625,32 +680,53 @@ class UniSAR(BaseModel):
                                                (all_his_emb.shape[0],
                                                 const.max_src_session_his_len))
 
+        all_mu, all_logvar, all_sigma, all_assign, intent_diagnostics = self.compute_intent_state(
+            all_his_emb, all_his_mask)
+        rec_mu, src_mu = self.split_rec_src(all_mu, all_his_type)
+        rec_sigma, src_sigma = self.split_rec_src(all_sigma, all_his_type)
+        rec_assign, src_assign = self.split_rec_src(all_assign, all_his_type)
+        global_explore, global_exploit = self.compute_path_transition_dynamics(
+            all_assign, all_his_mask)
+        rec_explore, rec_exploit = self.compute_path_transition_dynamics(
+            rec_assign, rec_his_mask)
+        src_explore, src_exploit = self.compute_path_transition_dynamics(
+            src_assign, src_his_mask)
+
         all_his_emb_w_pos = all_his_emb + self.global_pos_emb(all_his_emb)
 
         global_mask = all_his_type[:, :, None] == all_his_type[:, None, :]
 
         global_encoded = self.global_transformer(all_his_emb_w_pos,
-                                                 all_his_mask, global_mask)
+                                                 all_his_mask,
+                                                 global_mask,
+                                                 intent_mu=all_mu,
+                                                 intent_sigma=all_sigma,
+                                                 intent_assign=all_assign,
+                                                 explore=global_explore,
+                                                 exploit=global_exploit)
         src2rec, rec2src = self.split_rec_src(global_encoded, all_his_type)
         rec_his_ids, src_his_ids = self.split_rec_src_ids(all_his, all_his_type)
         src_proxy_item_ids = self.get_src_proxy_item_ids(src_his_ids)
-        all_mu, all_logvar, all_sigma, all_assign, intent_diagnostics = self.compute_intent_state(
-            global_encoded, all_his_mask)
-        rec_mu, src_mu = self.split_rec_src(all_mu, all_his_type)
-        rec_sigma, src_sigma = self.split_rec_src(all_sigma, all_his_type)
-        rec_assign, src_assign = self.split_rec_src(all_assign, all_his_type)
-        rec_explore, rec_exploit = self.compute_path_transition_dynamics(
-            rec_assign, rec_his_mask)
-        src_explore, src_exploit = self.compute_path_transition_dynamics(
-            src_assign, src_his_mask)
 
         rec_his_emb, src_his_emb = self.split_rec_src(all_his_emb,
                                                       all_his_type)
         rec_his_emb_w_pos = rec_his_emb + self.rec_pos(rec_his_emb)
         src_his_emb_w_pos = src_his_emb + self.src_pos(src_his_emb)
 
-        rec2rec = self.rec_transformer(rec_his_emb_w_pos, rec_his_mask)
-        src2src = self.src_transformer(src_his_emb_w_pos, src_his_mask)
+        rec2rec = self.rec_transformer(rec_his_emb_w_pos,
+                                       rec_his_mask,
+                                       intent_mu=rec_mu,
+                                       intent_sigma=rec_sigma,
+                                       intent_assign=rec_assign,
+                                       explore=rec_explore,
+                                       exploit=rec_exploit)
+        src2src = self.src_transformer(src_his_emb_w_pos,
+                                       src_his_mask,
+                                       intent_mu=src_mu,
+                                       intent_sigma=src_sigma,
+                                       intent_assign=src_assign,
+                                       explore=src_explore,
+                                       exploit=src_exploit)
 
         his_cl_used = [
             src2rec, rec2rec, rec_his_mask, rec2src, src2src, src_his_mask
@@ -667,6 +743,10 @@ class UniSAR(BaseModel):
                 all_mu, all_logvar),
             'intent_collapse_reg':
             intent_diagnostics['intent_collapse_reg'],
+            'intent_proto_sim_mean':
+            intent_diagnostics['intent_proto_sim_mean'],
+            'intent_proto_sim_max':
+            intent_diagnostics['intent_proto_sim_max'],
             'cf_consistency_reg':
             torch.tensor(0.0, device=all_his.device),
             'intent_mu_norm':
@@ -716,6 +796,10 @@ class UniSAR(BaseModel):
             'src_cross_gate_mean':
             torch.tensor(0.0, device=all_his.device),
             'attention_peak':
+            torch.tensor(0.0, device=all_his.device),
+            'attention_temp_mean':
+            torch.tensor(0.0, device=all_his.device),
+            'attention_temp_std':
             torch.tensor(0.0, device=all_his.device)
         }
 
@@ -852,7 +936,7 @@ class UniSAR(BaseModel):
                 query_emb=repeated_query_emb)
 
         rec_same_gate, rec_cross_gate, rec_gate_probs = self.compute_cross_supplement_gates(
-            rec_full_pred, rec_wo_cross_pred)
+            rec_full_pred, rec_wo_cross_pred, rec_wo_same_pred)
         src_same_gate, src_cross_gate, src_gate_probs = self.compute_counterfactual_gates(
             src_full_pred, src_wo_cross_pred, src_wo_same_pred)
         rec_same_delta = F.relu(rec_full_pred - rec_wo_same_pred).squeeze(-1)
@@ -866,7 +950,7 @@ class UniSAR(BaseModel):
             F.relu(src_wo_cross_pred - src_full_pred).mean() +
             F.relu(src_wo_same_pred - src_full_pred).mean())
 
-        rec_fusion_decoded, rec_attention_peak = self.apply_intent_attention(
+        rec_fusion_decoded, rec_attention_peak, rec_temp_mean, rec_temp_std = self.apply_intent_attention(
             query_seq=rec2rec,
             same_seq=rec2rec,
             cross_seq=src2rec,
@@ -885,7 +969,7 @@ class UniSAR(BaseModel):
             query_explore=rec_explore,
             query_exploit=rec_exploit)
 
-        src_fusion_decoded, src_attention_peak = self.apply_intent_attention(
+        src_fusion_decoded, src_attention_peak, src_temp_mean, src_temp_std = self.apply_intent_attention(
             query_seq=src2src,
             same_seq=src2src,
             cross_seq=rec2src,
@@ -944,8 +1028,13 @@ class UniSAR(BaseModel):
                                                       src_consistency)
         regularization['attention_peak'] = 0.5 * (
             rec_attention_peak + src_attention_peak)
+        regularization['attention_temp_mean'] = 0.5 * (rec_temp_mean +
+                                                       src_temp_mean)
+        regularization['attention_temp_std'] = 0.5 * (rec_temp_std +
+                                                      src_temp_std)
 
-        rec_fusion = rec_same_only + rec_cross_gate.unsqueeze(-1) * rec_cross_only
+        rec_fusion = rec_same_only + rec_cross_gate.unsqueeze(-1) * (
+            rec_cross_only - rec_same_only)
         src_fusion = self.src_his_attn_pooling(src_fusion_decoded, flat_items_emb,
                                                src_his_mask)
 
@@ -960,11 +1049,6 @@ class UniSAR(BaseModel):
 
         if domain == "rec":
             item_emb = item_emb.reshape(-1, item_emb.size(-1))
-
-            if self.rec_use_src_interest:
-                src_interest = src_interest
-            else:
-                src_interest = torch.zeros_like(src_interest)
 
             output = self.ple_layer(
                 torch.cat([
@@ -1044,6 +1128,10 @@ class UniSAR(BaseModel):
             'intent_separation_reg'].clone()
         loss_dict['intent_collapse_reg'] = regularization[
             'intent_collapse_reg'].clone()
+        loss_dict['intent_proto_sim_mean'] = regularization[
+            'intent_proto_sim_mean'].clone()
+        loss_dict['intent_proto_sim_max'] = regularization[
+            'intent_proto_sim_max'].clone()
         loss_dict['cf_consistency_reg'] = regularization[
             'cf_consistency_reg'].clone()
         loss_dict['intent_mu_norm'] = regularization['intent_mu_norm'].clone()
@@ -1083,6 +1171,10 @@ class UniSAR(BaseModel):
         loss_dict['src_cross_gate_mean'] = regularization[
             'src_cross_gate_mean'].clone()
         loss_dict['attention_peak'] = regularization['attention_peak'].clone()
+        loss_dict['attention_temp_mean'] = regularization[
+            'attention_temp_mean'].clone()
+        loss_dict['attention_temp_std'] = regularization[
+            'attention_temp_std'].clone()
         total_loss += self.uncertainty_reg_weight * regularization[
             'uncertainty_reg']
         total_loss += self.cf_sparsity_weight * regularization[
@@ -1188,6 +1280,10 @@ class UniSAR(BaseModel):
             'intent_separation_reg'].clone()
         loss_dict['intent_collapse_reg'] = regularization[
             'intent_collapse_reg'].clone()
+        loss_dict['intent_proto_sim_mean'] = regularization[
+            'intent_proto_sim_mean'].clone()
+        loss_dict['intent_proto_sim_max'] = regularization[
+            'intent_proto_sim_max'].clone()
         loss_dict['cf_consistency_reg'] = regularization[
             'cf_consistency_reg'].clone()
         loss_dict['intent_mu_norm'] = regularization['intent_mu_norm'].clone()
@@ -1227,6 +1323,10 @@ class UniSAR(BaseModel):
         loss_dict['src_cross_gate_mean'] = regularization[
             'src_cross_gate_mean'].clone()
         loss_dict['attention_peak'] = regularization['attention_peak'].clone()
+        loss_dict['attention_temp_mean'] = regularization[
+            'attention_temp_mean'].clone()
+        loss_dict['attention_temp_std'] = regularization[
+            'attention_temp_std'].clone()
         total_loss += self.uncertainty_reg_weight * regularization[
             'uncertainty_reg']
         total_loss += self.cf_sparsity_weight * regularization[
@@ -1392,33 +1492,181 @@ class TransAlign(nn.Module):
         return info_nce_loss
 
 
-class Transformer(nn.Module):
-    def __init__(self, emb_size, num_heads, num_layers, dropout) -> None:
+class IntentAwareSelfAttention(nn.Module):
+    def __init__(self, emb_size, num_heads, dropout,
+                 intent_assign_bias_weight, intent_mu_bias_weight,
+                 uncertainty_bias_weight, explore_temp_scale,
+                 exploit_temp_scale, attention_temp_min,
+                 attention_temp_max) -> None:
         super().__init__()
+        if emb_size % num_heads != 0:
+            num_heads = 1
+        self.emb_size = emb_size
         self.num_heads = num_heads
-        self.transformerEncoderLayer = nn.TransformerEncoderLayer(
-            d_model=emb_size,
-            nhead=num_heads,
-            dim_feedforward=emb_size,
+        self.head_dim = emb_size // num_heads
+        self.intent_assign_bias_weight = intent_assign_bias_weight
+        self.intent_mu_bias_weight = intent_mu_bias_weight
+        self.uncertainty_bias_weight = uncertainty_bias_weight
+        self.explore_temp_scale = explore_temp_scale
+        self.exploit_temp_scale = exploit_temp_scale
+        self.attention_temp_min = attention_temp_min
+        self.attention_temp_max = attention_temp_max
+
+        self.q_proj = nn.Linear(emb_size, emb_size)
+        self.k_proj = nn.Linear(emb_size, emb_size)
+        self.v_proj = nn.Linear(emb_size, emb_size)
+        self.out_proj = nn.Linear(emb_size, emb_size)
+        self.dropout = nn.Dropout(dropout)
+
+    def build_intent_bias(self, intent_mu, intent_sigma, intent_assign):
+        bias = None
+        if intent_assign is not None and self.intent_assign_bias_weight != 0:
+            assign_sim = torch.matmul(intent_assign,
+                                      intent_assign.transpose(-1, -2))
+            bias = self.intent_assign_bias_weight * assign_sim
+
+        if intent_mu is not None and self.intent_mu_bias_weight != 0:
+            mu_dist = (intent_mu.unsqueeze(2) -
+                       intent_mu.unsqueeze(1)).pow(2).mean(dim=-1)
+            mu_bias = -self.intent_mu_bias_weight * mu_dist
+            bias = mu_bias if bias is None else bias + mu_bias
+
+        if intent_sigma is not None and self.uncertainty_bias_weight != 0:
+            uncertainty = intent_sigma.mean(dim=-1).unsqueeze(1)
+            uncertainty_bias = -self.uncertainty_bias_weight * uncertainty
+            bias = uncertainty_bias if bias is None else bias + uncertainty_bias
+        return bias
+
+    def forward(self,
+                his_emb,
+                src_key_padding_mask,
+                src_mask=None,
+                intent_mu=None,
+                intent_sigma=None,
+                intent_assign=None,
+                explore=None,
+                exploit=None):
+        batch_size, seq_len, _ = his_emb.size()
+        query = self.q_proj(his_emb).reshape(
+            batch_size, seq_len, self.num_heads,
+            self.head_dim).transpose(1, 2)
+        key = self.k_proj(his_emb).reshape(batch_size, seq_len, self.num_heads,
+                                           self.head_dim).transpose(1, 2)
+        value = self.v_proj(his_emb).reshape(
+            batch_size, seq_len, self.num_heads,
+            self.head_dim).transpose(1, 2)
+
+        attn_logits = torch.matmul(query,
+                                   key.transpose(-1, -2)) / math.sqrt(
+                                       self.head_dim)
+        intent_bias = self.build_intent_bias(intent_mu, intent_sigma,
+                                             intent_assign)
+        if intent_bias is not None:
+            attn_logits = attn_logits + intent_bias.unsqueeze(1)
+
+        attn_mask = src_key_padding_mask.unsqueeze(1).unsqueeze(2)
+        if src_mask is not None:
+            attn_mask = attn_mask | src_mask.unsqueeze(1)
+        attn_logits = attn_logits.masked_fill(attn_mask, -1e16)
+
+        if explore is not None and exploit is not None:
+            temperature = 1.0 + self.explore_temp_scale * explore - \
+                self.exploit_temp_scale * exploit
+            temperature = temperature.clamp(min=self.attention_temp_min,
+                                            max=self.attention_temp_max)
+            temperature = temperature.masked_fill(src_key_padding_mask, 1.0)
+            attn_logits = attn_logits / temperature.unsqueeze(1).unsqueeze(-1)
+
+        attn_probs = torch.softmax(attn_logits, dim=-1)
+        attn_probs = attn_probs.masked_fill(attn_mask, 0.0)
+        attn_probs = attn_probs / attn_probs.sum(dim=-1,
+                                                 keepdim=True).clamp_min(1e-8)
+        attn_probs = self.dropout(attn_probs)
+        output = torch.matmul(attn_probs, value)
+        output = output.transpose(1, 2).reshape(batch_size, seq_len,
+                                               self.emb_size)
+        output = self.out_proj(output)
+        return output.masked_fill(src_key_padding_mask.unsqueeze(-1), 0.0)
+
+
+class IntentAwareTransformerLayer(nn.Module):
+    def __init__(self, emb_size, num_heads, dropout,
+                 intent_assign_bias_weight, intent_mu_bias_weight,
+                 uncertainty_bias_weight, explore_temp_scale,
+                 exploit_temp_scale, attention_temp_min,
+                 attention_temp_max) -> None:
+        super().__init__()
+        self.self_attn = IntentAwareSelfAttention(
+            emb_size=emb_size,
+            num_heads=num_heads,
             dropout=dropout,
-            batch_first=True)
-        self.transformer_encoder = nn.TransformerEncoder(
-            self.transformerEncoderLayer, num_layers=num_layers)
+            intent_assign_bias_weight=intent_assign_bias_weight,
+            intent_mu_bias_weight=intent_mu_bias_weight,
+            uncertainty_bias_weight=uncertainty_bias_weight,
+            explore_temp_scale=explore_temp_scale,
+            exploit_temp_scale=exploit_temp_scale,
+            attention_temp_min=attention_temp_min,
+            attention_temp_max=attention_temp_max)
+        self.linear1 = nn.Linear(emb_size, emb_size)
+        self.linear2 = nn.Linear(emb_size, emb_size)
+        self.norm1 = nn.LayerNorm(emb_size)
+        self.norm2 = nn.LayerNorm(emb_size)
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.ReLU()
+
+    def forward(self,
+                his_emb,
+                src_key_padding_mask,
+                src_mask=None,
+                intent_mu=None,
+                intent_sigma=None,
+                intent_assign=None,
+                explore=None,
+                exploit=None):
+        attn_output = self.self_attn(his_emb, src_key_padding_mask, src_mask,
+                                     intent_mu, intent_sigma, intent_assign,
+                                     explore, exploit)
+        his_emb = self.norm1(his_emb + self.dropout(attn_output))
+        ffn_output = self.linear2(self.dropout(self.activation(
+            self.linear1(his_emb))))
+        his_emb = self.norm2(his_emb + self.dropout(ffn_output))
+        return his_emb.masked_fill(src_key_padding_mask.unsqueeze(-1), 0.0)
+
+
+class Transformer(nn.Module):
+    def __init__(self, emb_size, num_heads, num_layers, dropout,
+                 intent_assign_bias_weight, intent_mu_bias_weight,
+                 uncertainty_bias_weight, explore_temp_scale,
+                 exploit_temp_scale, attention_temp_min,
+                 attention_temp_max) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList([
+            IntentAwareTransformerLayer(
+                emb_size=emb_size,
+                num_heads=num_heads,
+                dropout=dropout,
+                intent_assign_bias_weight=intent_assign_bias_weight,
+                intent_mu_bias_weight=intent_mu_bias_weight,
+                uncertainty_bias_weight=uncertainty_bias_weight,
+                explore_temp_scale=explore_temp_scale,
+                exploit_temp_scale=exploit_temp_scale,
+                attention_temp_min=attention_temp_min,
+                attention_temp_max=attention_temp_max)
+            for _ in range(num_layers)
+        ])
 
     def forward(self,
                 his_emb: torch.Tensor,
                 src_key_padding_mask: torch.Tensor,
-                src_mask: torch.Tensor = None):
-        if src_mask is not None:
-            src_mask_expand = src_mask.unsqueeze(1).expand(
-                (-1, self.num_heads, -1, -1)).reshape(
-                    (-1, his_emb.size(1), his_emb.size(1)))
-            his_encoded = self.transformer_encoder(
-                src=his_emb,
-                src_key_padding_mask=src_key_padding_mask,
-                mask=src_mask_expand)
-        else:
-            his_encoded = self.transformer_encoder(
-                src=his_emb, src_key_padding_mask=src_key_padding_mask)
-
+                src_mask: torch.Tensor = None,
+                intent_mu: torch.Tensor = None,
+                intent_sigma: torch.Tensor = None,
+                intent_assign: torch.Tensor = None,
+                explore: torch.Tensor = None,
+                exploit: torch.Tensor = None):
+        his_encoded = his_emb
+        for layer in self.layers:
+            his_encoded = layer(his_encoded, src_key_padding_mask, src_mask,
+                                intent_mu, intent_sigma, intent_assign,
+                                explore, exploit)
         return his_encoded
