@@ -461,15 +461,14 @@ class SarRunner(BaseRunner):
         logging.info("total time: {:.2f}s".format(time.time() - start))
         diagnostic_groups = {
             'intent': [
-                'intent_mu_norm', 'intent_assign_entropy',
-                'intent_usage_max', 'intent_residual_mean',
-                'intent_proto_sim_mean', 'intent_proto_sim_max',
-                'intent_collapse_reg'
+                'intent_assign_entropy', 'intent_confidence',
+                'intent_usage_entropy', 'intent_usage_max',
+                'intent_residual_mean', 'intent_proto_sim_mean',
+                'intent_proto_sim_max', 'intent_assignment_reg'
             ],
             'transition': [
                 'transition_explore_mean', 'transition_exploit_mean'
             ],
-            'uncertainty': ['uncertainty_mean', 'uncertainty_std'],
             'cf': [
                 'cf_mask_mean', 'cf_necessity_mean', 'cf_potential_mean',
                 'cf_self_mean', 'cf_consistency_reg'
@@ -479,9 +478,6 @@ class SarRunner(BaseRunner):
                 'rec_same_delta_mean', 'rec_cross_delta_mean',
                 'src_same_delta_mean', 'src_cross_delta_mean',
                 'rec_cross_gate_mean', 'src_cross_gate_mean'
-            ],
-            'attention': [
-                'attention_peak', 'attention_temp_mean', 'attention_temp_std'
             ]
         }
 
@@ -504,8 +500,6 @@ class SarRunner(BaseRunner):
 
         def build_flags(domain_loss):
             flags = []
-            attention_peak = np.mean(domain_loss.get('attention_peak',
-                                                     [0.0])).item()
             cf_mask_mean = np.mean(domain_loss.get('cf_mask_mean',
                                                    [0.5])).item()
             intent_usage_max = np.mean(domain_loss.get('intent_usage_max',
@@ -518,10 +512,10 @@ class SarRunner(BaseRunner):
                 domain_loss.get('transition_explore_mean', [0.0])).item()
             transition_exploit = np.mean(
                 domain_loss.get('transition_exploit_mean', [0.0])).item()
-            if attention_peak > getattr(model, 'intent_peak_ceiling', 0.80):
-                flags.append('attention_peaky')
             if intent_usage_max > 0.70:
                 flags.append('intent_usage_collapse')
+            if intent_entropy > 0.85:
+                flags.append('intent_assignment_high_entropy')
             if intent_entropy < 0.20:
                 flags.append('intent_assignment_low_entropy')
             if intent_proto_sim_max > 0.80:
