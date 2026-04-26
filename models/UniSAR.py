@@ -49,7 +49,11 @@ class UniSAR(BaseModel):
         parser.add_argument('--intent_diversity_margin',
                             type=float,
                             default=0.2)
-        parser.add_argument('--transition_decay', type=float, default=0.2)
+        parser.add_argument('--intent_history_decay', type=float, default=0.9)
+        parser.add_argument('--intent_var_min', type=float, default=1e-4)
+        parser.add_argument('--intent_update_sharpen',
+                            type=float,
+                            default=2.0)
         parser.add_argument('--explore_temp_scale', type=float, default=2.0)
         parser.add_argument('--exploit_temp_scale', type=float, default=1.5)
         parser.add_argument('--transformer_temp_min',
@@ -75,7 +79,9 @@ class UniSAR(BaseModel):
         self.intent_entropy_target = args.intent_entropy_target
         self.intent_confidence_target = args.intent_confidence_target
         self.intent_diversity_margin = args.intent_diversity_margin
-        self.transition_decay = args.transition_decay
+        self.intent_history_decay = args.intent_history_decay
+        self.intent_var_min = args.intent_var_min
+        self.intent_update_sharpen = args.intent_update_sharpen
         self.explore_temp_scale = args.explore_temp_scale
         self.exploit_temp_scale = args.exploit_temp_scale
         self.transformer_temp_min = args.transformer_temp_min
@@ -290,49 +296,88 @@ class UniSAR(BaseModel):
         }
         return assign, diagnostics
 
-    def compute_path_transition_dynamics(self, assign, mask):
+    def compute_path_transition_dynamics(self, seq_emb, assign, mask):
         if assign.size(1) <= 1:
-            zeros = assign.new_zeros(assign.size(0), assign.size(1))
-            return zeros, zeros
+            zeros = seq_emb.new_zeros(seq_emb.size(0), seq_emb.size(1))
+            diagnostics = {
+                'transition_density_mean': zeros.new_tensor(0.0),
+                'transition_compactness_mean': zeros.new_tensor(0.0),
+                'transition_history_ready_mean': zeros.new_tensor(0.0),
+                'transition_mahalanobis_mean': zeros.new_tensor(0.0)
+            }
+            return zeros, zeros, diagnostics
 
-        assign_prob = assign.clamp_min(1e-8)
-        entropy = -(assign_prob * assign_prob.log()).sum(dim=-1)
-        if self.intent_num > 1:
-            entropy = entropy / math.log(self.intent_num)
+        valid = (~mask).float()
+        batch_size, seq_len, emb_dim = seq_emb.size()
+        weight_sum = seq_emb.new_zeros(batch_size, self.intent_num)
+        first_moment = seq_emb.new_zeros(batch_size, self.intent_num, emb_dim)
+        second_moment = seq_emb.new_zeros(batch_size, self.intent_num, emb_dim)
+        explore = seq_emb.new_zeros(batch_size, seq_len)
+        exploit = seq_emb.new_zeros(batch_size, seq_len)
+        weighted_density = seq_emb.new_zeros(batch_size, seq_len)
+        weighted_compactness = seq_emb.new_zeros(batch_size, seq_len)
+        weighted_history_ready = seq_emb.new_zeros(batch_size, seq_len)
+        weighted_mahalanobis = seq_emb.new_zeros(batch_size, seq_len)
 
-        curr = assign_prob.unsqueeze(2)
-        prev = assign_prob.unsqueeze(1)
-        midpoint = (curr + prev).mul(0.5).clamp_min(1e-8)
-        js_div = 0.5 * (
-            curr * (curr.log() - midpoint.log())).sum(dim=-1) + 0.5 * (
-                prev * (prev.log() - midpoint.log())).sum(dim=-1)
-        if self.intent_num > 1:
-            js_div = js_div / math.log(2.0)
+        for t in range(seq_len):
+            token_valid = valid[:, t:t + 1]
+            token_assign = assign[:, t, :] * token_valid
+            update_assign = token_assign.pow(self.intent_update_sharpen)
+            update_assign = update_assign / update_assign.sum(
+                dim=-1, keepdim=True).clamp_min(1e-8)
+            top_intent = update_assign.argmax(dim=-1, keepdim=True)
+            sparse_update_assign = torch.zeros_like(update_assign).scatter(
+                1,
+                top_intent,
+                torch.gather(update_assign, 1, top_intent))
+            history_ready = (weight_sum > 1e-6).float()
+            denom = weight_sum.unsqueeze(-1).clamp_min(1e-6)
+            hist_mean = first_moment / denom
+            hist_var = (second_moment / denom - hist_mean.pow(2)).clamp_min(
+                self.intent_var_min)
 
-        curr_uncertainty = entropy.unsqueeze(2)
-        prev_uncertainty = entropy.unsqueeze(1)
-        uncertainty_delta = curr_uncertainty - prev_uncertainty
-        curr_certainty = 1.0 - curr_uncertainty
-        certainty_gain = F.relu(-uncertainty_delta)
-        intent_similarity = (curr * prev).sum(dim=-1)
+            token_state = seq_emb[:, t, :].unsqueeze(1)
+            delta = token_state - hist_mean
+            mahalanobis = (delta.pow(2) / hist_var).mean(dim=-1)
+            density = torch.exp(-0.5 * mahalanobis) * history_ready
+            compactness = (1.0 / (1.0 + hist_var.mean(dim=-1))) * history_ready
 
-        positions = torch.arange(assign.size(1), device=assign.device)
-        distance = positions.view(1, -1, 1) - positions.view(1, 1, -1)
-        pair_mask = distance > 0
-        valid_pair = pair_mask & (~mask).unsqueeze(2) & (~mask).unsqueeze(1)
-        decay = torch.exp(-self.transition_decay *
-                          distance.clamp_min(0).float())
-        pair_weight = decay * valid_pair.float()
-        denom = pair_weight.sum(dim=-1).clamp_min(1e-8)
+            exploit_k = density * compactness
+            explore_k = (0.5 * (1.0 - density) +
+                         0.5 * (1.0 - compactness)) * history_ready
+            explore[:, t] = (token_assign * explore_k).sum(dim=-1)
+            exploit[:, t] = (token_assign * exploit_k).sum(dim=-1)
+            weighted_density[:, t] = (token_assign * density).sum(dim=-1)
+            weighted_compactness[:, t] = (token_assign *
+                                          compactness).sum(dim=-1)
+            weighted_history_ready[:, t] = (token_assign *
+                                            history_ready).sum(dim=-1)
+            weighted_mahalanobis[:, t] = (token_assign *
+                                          mahalanobis * history_ready).sum(
+                                              dim=-1)
 
-        explore_pair = js_div * F.relu(uncertainty_delta)
-        exploit_strength = (curr_certainty + certainty_gain).clamp(max=1.0)
-        exploit_pair = intent_similarity * exploit_strength
-        explore = (explore_pair * pair_weight).sum(dim=-1) / denom
-        exploit = (exploit_pair * pair_weight).sum(dim=-1) / denom
+            token_feature = seq_emb[:, t, :].unsqueeze(1)
+            weighted_feature = sparse_update_assign.unsqueeze(-1) * \
+                token_feature
+            decay = self.intent_history_decay
+            weight_sum = decay * weight_sum + sparse_update_assign
+            first_moment = decay * first_moment + weighted_feature
+            second_moment = decay * second_moment + weighted_feature * \
+                token_feature
+
         explore = explore.masked_fill(mask, 0.0)
         exploit = exploit.masked_fill(mask, 0.0)
-        return explore, exploit
+        diagnostics = {
+            'transition_density_mean':
+            self.safe_masked_mean(weighted_density, ~mask),
+            'transition_compactness_mean':
+            self.safe_masked_mean(weighted_compactness, ~mask),
+            'transition_history_ready_mean':
+            self.safe_masked_mean(weighted_history_ready, ~mask),
+            'transition_mahalanobis_mean':
+            self.safe_masked_mean(weighted_mahalanobis, ~mask)
+        }
+        return explore, exploit, diagnostics
 
     def compute_intent_usage(self, assign, valid_mask):
         valid_count = valid_mask.float().sum()
@@ -423,12 +468,17 @@ class UniSAR(BaseModel):
         all_assign, intent_diagnostics = self.compute_intent_state(
             all_his_emb, all_his_mask)
         rec_assign, src_assign = self.split_rec_src(all_assign, all_his_type)
-        global_explore, global_exploit = self.compute_path_transition_dynamics(
-            all_assign, all_his_mask)
-        rec_explore, rec_exploit = self.compute_path_transition_dynamics(
-            rec_assign, rec_his_mask)
-        src_explore, src_exploit = self.compute_path_transition_dynamics(
-            src_assign, src_his_mask)
+        global_explore, global_exploit, global_transition_diagnostics = \
+            self.compute_path_transition_dynamics(all_his_emb, all_assign,
+                                                  all_his_mask)
+        rec_his_emb, src_his_emb = self.split_rec_src(all_his_emb,
+                                                      all_his_type)
+        rec_explore, rec_exploit, rec_transition_diagnostics = \
+            self.compute_path_transition_dynamics(rec_his_emb, rec_assign,
+                                                  rec_his_mask)
+        src_explore, src_exploit, src_transition_diagnostics = \
+            self.compute_path_transition_dynamics(src_his_emb, src_assign,
+                                                  src_his_mask)
 
         all_his_emb_w_pos = all_his_emb + self.global_pos_emb(all_his_emb)
 
@@ -445,8 +495,6 @@ class UniSAR(BaseModel):
             (~has_cross_source).unsqueeze(-1), 0.0)
         src2rec, rec2src = self.split_rec_src(global_encoded, all_his_type)
 
-        rec_his_emb, src_his_emb = self.split_rec_src(all_his_emb,
-                                                      all_his_type)
         rec_his_emb_w_pos = rec_his_emb + self.rec_pos(rec_his_emb)
         src_his_emb_w_pos = src_his_emb + self.src_pos(src_his_emb)
 
@@ -490,6 +538,18 @@ class UniSAR(BaseModel):
             'transition_exploit_mean':
             0.5 * (self.safe_masked_mean(rec_exploit, ~rec_his_mask) +
                    self.safe_masked_mean(src_exploit, ~src_his_mask)),
+            'transition_density_mean':
+            0.5 * (rec_transition_diagnostics['transition_density_mean'] +
+                   src_transition_diagnostics['transition_density_mean']),
+            'transition_compactness_mean':
+            0.5 * (rec_transition_diagnostics['transition_compactness_mean'] +
+                   src_transition_diagnostics['transition_compactness_mean']),
+            'transition_history_ready_mean':
+            0.5 * (rec_transition_diagnostics['transition_history_ready_mean']
+                   + src_transition_diagnostics['transition_history_ready_mean']),
+            'transition_mahalanobis_mean':
+            0.5 * (rec_transition_diagnostics['transition_mahalanobis_mean'] +
+                   src_transition_diagnostics['transition_mahalanobis_mean']),
             'cf_mask_mean':
             torch.tensor(0.0, device=all_his.device),
             'cf_necessity_mean':

@@ -467,7 +467,11 @@ class SarRunner(BaseRunner):
                 'intent_proto_sim_max', 'intent_assignment_reg'
             ],
             'transition': [
-                'transition_explore_mean', 'transition_exploit_mean'
+                'transition_explore_mean', 'transition_exploit_mean',
+                'transition_density_mean',
+                'transition_compactness_mean',
+                'transition_history_ready_mean',
+                'transition_mahalanobis_mean'
             ],
             'cf': [
                 'cf_mask_mean', 'cf_necessity_mean', 'cf_potential_mean',
