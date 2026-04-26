@@ -54,6 +54,7 @@ class UniSAR(BaseModel):
         parser.add_argument('--intent_update_sharpen',
                             type=float,
                             default=2.0)
+        parser.add_argument('--rec_cross_alpha', type=float, default=0.25)
         parser.add_argument('--explore_temp_scale', type=float, default=2.0)
         parser.add_argument('--exploit_temp_scale', type=float, default=1.5)
         parser.add_argument('--transformer_temp_min',
@@ -82,6 +83,7 @@ class UniSAR(BaseModel):
         self.intent_history_decay = args.intent_history_decay
         self.intent_var_min = args.intent_var_min
         self.intent_update_sharpen = args.intent_update_sharpen
+        self.rec_cross_alpha = args.rec_cross_alpha
         self.explore_temp_scale = args.explore_temp_scale
         self.exploit_temp_scale = args.exploit_temp_scale
         self.transformer_temp_min = args.transformer_temp_min
@@ -724,8 +726,9 @@ class UniSAR(BaseModel):
         regularization['cf_consistency_reg'] = 0.5 * (rec_consistency +
                                                       src_consistency)
 
-        rec_fusion = rec_same_only + rec_cross_gate.unsqueeze(-1) * (
-            rec_cross_only - rec_same_only)
+        rec_cross_only_detached = rec_cross_only.detach()
+        rec_fusion = rec_same_only + self.rec_cross_alpha * \
+            rec_cross_gate.unsqueeze(-1) * rec_cross_only_detached
         src_fusion = src_same_only + src_cross_gate.unsqueeze(-1) * (
             src_cross_only - src_same_only)
 

@@ -23,6 +23,7 @@ intent_temp: 0.5
 intent_history_decay: 0.9
 intent_var_min: 0.0001
 intent_update_sharpen: 2.0
+rec_cross_alpha: 0.25
 explore_temp_scale: 2.0
 exploit_temp_scale: 1.5
 transformer_temp_min: 0.7
