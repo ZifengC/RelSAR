@@ -464,18 +464,28 @@ class SarRunner(BaseRunner):
                 'intent_assign_entropy', 'intent_confidence',
                 'intent_usage_entropy', 'intent_usage_max',
                 'intent_residual_mean', 'intent_proto_sim_mean',
-                'intent_proto_sim_max', 'intent_assignment_reg'
+                'intent_proto_sim_max', 'intent_proto_sim_min',
+                'intent_proto_margin_violation', 'intent_assignment_reg'
             ],
-            'transition': [
-                'transition_explore_mean', 'transition_exploit_mean',
-                'transition_density_mean',
-                'transition_compactness_mean',
-                'transition_history_ready_mean',
-                'transition_mahalanobis_mean'
+            'belief': [
+                'belief_distance_raw_mean',
+                'belief_distance_squashed_mean',
+                'belief_entropy_mean', 'belief_uncertainty_mean',
+                'belief_uncertainty_early_mean',
+                'belief_uncertainty_mid_mean',
+                'belief_uncertainty_late_mean',
+                'belief_confidence_mean', 'belief_variance_mean',
+                'attention_temp_mean', 'attention_temp_early_mean',
+                'attention_temp_mid_mean', 'attention_temp_late_mean',
+                'attention_temp_min', 'attention_temp_max', 'belief_mass_mean',
+                'belief_mass_min', 'belief_mass_max'
             ],
             'cf': [
                 'cf_mask_mean', 'cf_necessity_mean', 'cf_potential_mean',
-                'cf_self_mean', 'cf_consistency_reg'
+                'cf_self_mean', 'cf_consistency_reg', 'rec_gate_entropy',
+                'src_gate_entropy', 'rec_same_gate_mean',
+                'rec_mix_mean', 'src_mix_mean',
+                'src_same_gate_mean'
             ],
             'path': [
                 'path_s2s', 'path_r2s', 'path_r2r', 'path_s2r',
@@ -512,10 +522,15 @@ class SarRunner(BaseRunner):
                                                      [1.0])).item()
             intent_proto_sim_max = np.mean(
                 domain_loss.get('intent_proto_sim_max', [0.0])).item()
-            transition_explore = np.mean(
-                domain_loss.get('transition_explore_mean', [0.0])).item()
-            transition_exploit = np.mean(
-                domain_loss.get('transition_exploit_mean', [0.0])).item()
+            intent_proto_margin_violation = np.mean(
+                domain_loss.get('intent_proto_margin_violation',
+                                [0.0])).item()
+            belief_uncertainty = np.mean(
+                domain_loss.get('belief_uncertainty_mean', [0.0])).item()
+            belief_confidence = np.mean(
+                domain_loss.get('belief_confidence_mean', [0.0])).item()
+            attention_temp_mean = np.mean(
+                domain_loss.get('attention_temp_mean', [1.0])).item()
             if intent_usage_max > 0.70:
                 flags.append('intent_usage_collapse')
             if intent_entropy > 0.85:
@@ -524,12 +539,14 @@ class SarRunner(BaseRunner):
                 flags.append('intent_assignment_low_entropy')
             if intent_proto_sim_max > 0.80:
                 flags.append('intent_proto_too_similar')
-            if transition_explore > 1.5 * transition_exploit and \
-                    transition_explore > 1e-4:
-                flags.append('transition_explore_dominant')
-            if transition_exploit > 1.5 * transition_explore and \
-                    transition_exploit > 1e-4:
-                flags.append('transition_exploit_dominant')
+            if intent_proto_margin_violation > 0.10:
+                flags.append('intent_proto_margin_violation')
+            if belief_uncertainty > 0.80:
+                flags.append('belief_high_uncertainty')
+            if belief_confidence < 0.25:
+                flags.append('belief_low_confidence')
+            if attention_temp_mean > 1.40:
+                flags.append('attention_temp_high')
             if cf_mask_mean < getattr(model, 'cf_mask_floor', 0.05):
                 flags.append('cf_mask_too_small')
             if cf_mask_mean > getattr(model, 'cf_mask_ceiling', 0.95):

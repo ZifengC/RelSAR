@@ -55,9 +55,29 @@ if __name__ == '__main__':
 
     utils.load_hyperparam(args)
     utils.set_logging(args)
-    print(args)
     for flag, value in sorted(args.__dict__.items(), key=lambda x: x[0]):
         logging.info('{}: {}'.format(flag, value))
+    logging.info(
+        "Key Params |intent num:{} heads:{} temp:{} dropout:{} diversity_margin:{} assign_weight:{}|"
+        .format(args.intent_num, args.intent_heads, args.intent_temp,
+                args.intent_dropout, args.intent_diversity_margin,
+                args.intent_assignment_weight))
+    logging.info(
+        "Key Params |belief init_var:{} init_mass:{} decay:{} temp:{} prior_weight:{} var_min:{}|"
+        .format(args.belief_init_var, args.belief_init_mass,
+                args.belief_decay, args.belief_temp,
+                args.belief_prior_weight, args.intent_var_min))
+    logging.info(
+        "Key Params |uncertainty dist_scale:{} dist_power:{} base_temp:{} temp_scale:{} logit_scale:{} prob_power:{} temp_min:{} temp_max:{}|"
+        .format(args.belief_distance_scale, args.belief_distance_power,
+                args.attention_base_temp, args.uncertainty_temp_scale,
+                args.attention_logit_scale, args.attention_prob_power,
+                args.transformer_temp_min, args.transformer_temp_max))
+    logging.info(
+        "Key Params |counterfactual gate_scale:{} consistency_weight:{} rec_cross_alpha:{} src_loss_weight:{}|"
+        .format(args.cf_gate_scale, args.cf_consistency_weight,
+                args.rec_cross_alpha,
+                args.src_loss_weight))
 
     model: BaseModel = UniSAR(args)
     runner: BaseRunner = SarRunner(args)
