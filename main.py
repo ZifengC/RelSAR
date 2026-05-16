@@ -68,10 +68,12 @@ if __name__ == '__main__':
                 args.belief_temp, args.belief_prior_weight,
                 args.intent_var_min))
     logging.info(
-        "Key Params |uncertainty base_temp:{} temp_scale:{} logit_scale:{} prob_power:{} temp_min:{} temp_max:{}|"
-        .format(args.attention_base_temp, args.uncertainty_temp_scale,
-                args.attention_logit_scale, args.attention_prob_power,
-                args.transformer_temp_min, args.transformer_temp_max))
+        "Key Params |attention uncertainty_enabled:{} intent_bias_enabled:{} base_temp:{} temp_scale:{} logit_scale:{} intent_bias_scale:{} prob_power:{} temp_min:{} temp_max:{}|"
+        .format(args.use_uncertainty_attention, args.use_intent_logit_bias,
+                args.attention_base_temp, args.uncertainty_temp_scale,
+                args.attention_logit_scale, args.intent_logit_bias_scale,
+                args.attention_prob_power, args.transformer_temp_min,
+                args.transformer_temp_max))
     logging.info(
         "Key Params |counterfactual gate_scale:{} consistency_weight:{} src_loss_weight:{}|"
         .format(args.cf_gate_scale, args.cf_consistency_weight,

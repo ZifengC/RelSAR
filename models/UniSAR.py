@@ -118,9 +118,11 @@ class UniSAR(BaseModel):
         parser.add_argument('--intent_logit_bias_scale',
                             type=float,
                             default=1.0)
+        parser.add_argument('--use_intent_logit_bias', type=int, default=1)
         parser.add_argument('--attention_prob_power',
                             type=float,
                             default=1.5)
+        parser.add_argument('--use_uncertainty_attention', type=int, default=1)
         parser.add_argument('--transformer_temp_min',
                             type=float,
                             default=0.7)
@@ -151,7 +153,9 @@ class UniSAR(BaseModel):
         self.uncertainty_temp_scale = args.uncertainty_temp_scale
         self.attention_logit_scale = args.attention_logit_scale
         self.intent_logit_bias_scale = args.intent_logit_bias_scale
+        self.use_intent_logit_bias = bool(args.use_intent_logit_bias)
         self.attention_prob_power = args.attention_prob_power
+        self.use_uncertainty_attention = bool(args.use_uncertainty_attention)
         self.transformer_temp_min = args.transformer_temp_min
         self.transformer_temp_max = args.transformer_temp_max
         self.src_pos = PositionalEmbedding(const.max_src_session_his_len,
@@ -425,14 +429,20 @@ class UniSAR(BaseModel):
                             posterior.clamp_min(1e-8).log()).sum(dim=-1)
             if self.intent_num > 1:
                 entropy_unc = entropy_unc / math.log(self.intent_num)
-            features = entropy_unc.unsqueeze(-1)
-            fused_uncertainty = torch.sigmoid(
-                self.uncertainty_fusion(self.uncertainty_norm(features))).squeeze(-1)
-            attention_temp = self.attention_base_temp + \
-                self.uncertainty_temp_scale * fused_uncertainty
-            attention_temp = attention_temp.clamp(
-                min=self.transformer_temp_min,
-                max=self.transformer_temp_max)
+            if self.use_uncertainty_attention:
+                features = entropy_unc.unsqueeze(-1)
+                fused_uncertainty = torch.sigmoid(
+                    self.uncertainty_fusion(
+                        self.uncertainty_norm(features))).squeeze(-1)
+                attention_temp = self.attention_base_temp + \
+                    self.uncertainty_temp_scale * fused_uncertainty
+                attention_temp = attention_temp.clamp(
+                    min=self.transformer_temp_min,
+                    max=self.transformer_temp_max)
+            else:
+                fused_uncertainty = torch.zeros_like(entropy_unc)
+                attention_temp = torch.full_like(entropy_unc,
+                                                 self.attention_base_temp)
 
             uncertainty[:, t] = fused_uncertainty * valid_t.float()
             entropy_trace[:, t] = entropy_unc * valid_t.float()
@@ -652,11 +662,25 @@ class UniSAR(BaseModel):
 
         global_mask = all_his_type[:, :, None] == all_his_type[:, None, :]
 
-        global_encoded = self.global_transformer(all_his_emb_w_pos,
-                                                 all_his_mask,
-                                                 global_mask,
-                                                 uncertainty=global_uncertainty,
-                                                 intent_assign=global_posterior)
+        global_attention_uncertainty = global_uncertainty \
+            if self.use_uncertainty_attention else None
+        rec_attention_uncertainty = rec_uncertainty \
+            if self.use_uncertainty_attention else None
+        src_attention_uncertainty = src_uncertainty \
+            if self.use_uncertainty_attention else None
+        global_attention_intent = global_posterior \
+            if self.use_intent_logit_bias else None
+        rec_attention_intent = rec_posterior \
+            if self.use_intent_logit_bias else None
+        src_attention_intent = src_posterior \
+            if self.use_intent_logit_bias else None
+
+        global_encoded = self.global_transformer(
+            all_his_emb_w_pos,
+            all_his_mask,
+            global_mask,
+            uncertainty=global_attention_uncertainty,
+            intent_assign=global_attention_intent)
         cross_valid = (~global_mask) & (~all_his_mask).unsqueeze(1)
         has_cross_source = cross_valid.any(dim=-1)
         global_encoded = global_encoded.masked_fill(
@@ -668,12 +692,12 @@ class UniSAR(BaseModel):
 
         rec2rec = self.rec_transformer(rec_his_emb_w_pos,
                                        rec_his_mask,
-                                       uncertainty=rec_uncertainty,
-                                       intent_assign=rec_posterior)
+                                       uncertainty=rec_attention_uncertainty,
+                                       intent_assign=rec_attention_intent)
         src2src = self.src_transformer(src_his_emb_w_pos,
                                        src_his_mask,
-                                       uncertainty=src_uncertainty,
-                                       intent_assign=src_posterior)
+                                       uncertainty=src_attention_uncertainty,
+                                       intent_assign=src_attention_intent)
 
         his_cl_used = [
             src2rec, rec2rec, rec_his_mask, rec2src, src2src, src_his_mask
