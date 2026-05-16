@@ -20,6 +20,7 @@ his_cl_weight: 0.1
 pred_hid_units: [200, 80, 1]
 
 intent_temp: 0.5
+intent_num: 8
 intent_var_min: 0.0001
 rec_cross_alpha: 0.05
 belief_init_var: 1.0
@@ -32,6 +33,7 @@ belief_distance_power: 1.5
 attention_base_temp: 1.0
 uncertainty_temp_scale: 0.5
 attention_logit_scale: 1.5
+intent_logit_bias_scale: 1.0
 attention_prob_power: 1.5
 transformer_temp_min: 0.7
 transformer_temp_max: 1.5

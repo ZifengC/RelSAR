@@ -69,6 +69,9 @@ class UniSAR(BaseModel):
         parser.add_argument('--attention_logit_scale',
                             type=float,
                             default=1.5)
+        parser.add_argument('--intent_logit_bias_scale',
+                            type=float,
+                            default=1.0)
         parser.add_argument('--attention_prob_power',
                             type=float,
                             default=1.5)
@@ -107,6 +110,7 @@ class UniSAR(BaseModel):
         self.attention_base_temp = args.attention_base_temp
         self.uncertainty_temp_scale = args.uncertainty_temp_scale
         self.attention_logit_scale = args.attention_logit_scale
+        self.intent_logit_bias_scale = args.intent_logit_bias_scale
         self.attention_prob_power = args.attention_prob_power
         self.transformer_temp_min = args.transformer_temp_min
         self.transformer_temp_max = args.transformer_temp_max
@@ -125,6 +129,7 @@ class UniSAR(BaseModel):
                                            attention_base_temp=self.attention_base_temp,
                                            uncertainty_temp_scale=self.uncertainty_temp_scale,
                                            attention_logit_scale=self.attention_logit_scale,
+                                           intent_logit_bias_scale=self.intent_logit_bias_scale,
                                            attention_prob_power=self.attention_prob_power,
                                            transformer_temp_min=self.transformer_temp_min,
                                            transformer_temp_max=self.transformer_temp_max)
@@ -135,6 +140,7 @@ class UniSAR(BaseModel):
                                            attention_base_temp=self.attention_base_temp,
                                            uncertainty_temp_scale=self.uncertainty_temp_scale,
                                            attention_logit_scale=self.attention_logit_scale,
+                                           intent_logit_bias_scale=self.intent_logit_bias_scale,
                                            attention_prob_power=self.attention_prob_power,
                                            transformer_temp_min=self.transformer_temp_min,
                                            transformer_temp_max=self.transformer_temp_max)
@@ -145,6 +151,7 @@ class UniSAR(BaseModel):
                                               attention_base_temp=self.attention_base_temp,
                                               uncertainty_temp_scale=self.uncertainty_temp_scale,
                                               attention_logit_scale=self.attention_logit_scale,
+                                              intent_logit_bias_scale=self.intent_logit_bias_scale,
                                               attention_prob_power=self.attention_prob_power,
                                               transformer_temp_min=self.transformer_temp_min,
                                               transformer_temp_max=self.transformer_temp_max)
@@ -341,6 +348,8 @@ class UniSAR(BaseModel):
 
     def compute_belief_dynamics(self, seq_emb, intents, prior_assign, mask):
         batch_size, seq_len, emb_dim = seq_emb.size()
+        posterior_trace = seq_emb.new_zeros(batch_size, seq_len,
+                                            self.intent_num)
         uncertainty = seq_emb.new_zeros(batch_size, seq_len)
         distance_raw_trace = seq_emb.new_zeros(batch_size, seq_len)
         distance_squashed_trace = seq_emb.new_zeros(batch_size, seq_len)
@@ -376,6 +385,7 @@ class UniSAR(BaseModel):
             posterior = posterior * valid_t.unsqueeze(-1).float()
             posterior = posterior / posterior.sum(dim=-1,
                                                   keepdim=True).clamp_min(1e-8)
+            posterior_trace[:, t, :] = posterior
 
             distance_unc = (posterior * dist).sum(dim=-1)
             entropy_unc = -(posterior.clamp_min(1e-8) *
@@ -453,7 +463,8 @@ class UniSAR(BaseModel):
                                        'belief_uncertainty'))
         diagnostics.update(
             self.compute_segment_means(temp_trace, valid, 'attention_temp'))
-        return uncertainty.masked_fill(mask, 0.0), diagnostics
+        posterior_trace = posterior_trace.masked_fill(mask.unsqueeze(-1), 0.0)
+        return posterior_trace, uncertainty.masked_fill(mask, 0.0), diagnostics
 
     def compute_intent_usage(self, assign, valid_mask):
         valid_count = valid_mask.float().sum()
@@ -554,13 +565,15 @@ class UniSAR(BaseModel):
             self.compute_intent_state(rec_his_emb, rec_his_mask)
         src_intents, src_prior_assign, _ = \
             self.compute_intent_state(src_his_emb, src_his_mask)
-        global_uncertainty, global_belief_diagnostics = \
+        global_posterior, global_uncertainty, global_belief_diagnostics = \
             self.compute_belief_dynamics(all_his_emb, all_intents, all_assign,
                                          all_his_mask)
-        rec_uncertainty, rec_belief_diagnostics = self.compute_belief_dynamics(
-            rec_his_emb, rec_intents, rec_prior_assign, rec_his_mask)
-        src_uncertainty, src_belief_diagnostics = self.compute_belief_dynamics(
-            src_his_emb, src_intents, src_prior_assign, src_his_mask)
+        rec_posterior, rec_uncertainty, rec_belief_diagnostics = \
+            self.compute_belief_dynamics(rec_his_emb, rec_intents,
+                                         rec_prior_assign, rec_his_mask)
+        src_posterior, src_uncertainty, src_belief_diagnostics = \
+            self.compute_belief_dynamics(src_his_emb, src_intents,
+                                         src_prior_assign, src_his_mask)
 
         all_his_emb_w_pos = all_his_emb + self.global_pos_emb(all_his_emb)
 
@@ -569,7 +582,8 @@ class UniSAR(BaseModel):
         global_encoded = self.global_transformer(all_his_emb_w_pos,
                                                  all_his_mask,
                                                  global_mask,
-                                                 uncertainty=global_uncertainty)
+                                                 uncertainty=global_uncertainty,
+                                                 intent_assign=global_posterior)
         cross_valid = (~global_mask) & (~all_his_mask).unsqueeze(1)
         has_cross_source = cross_valid.any(dim=-1)
         global_encoded = global_encoded.masked_fill(
@@ -581,10 +595,12 @@ class UniSAR(BaseModel):
 
         rec2rec = self.rec_transformer(rec_his_emb_w_pos,
                                        rec_his_mask,
-                                       uncertainty=rec_uncertainty)
+                                       uncertainty=rec_uncertainty,
+                                       intent_assign=rec_posterior)
         src2src = self.src_transformer(src_his_emb_w_pos,
                                        src_his_mask,
-                                       uncertainty=src_uncertainty)
+                                       uncertainty=src_uncertainty,
+                                       intent_assign=src_posterior)
 
         his_cl_used = [
             src2rec, rec2rec, rec_his_mask, rec2src, src2src, src_his_mask
@@ -1397,8 +1413,8 @@ class TransAlign(nn.Module):
 class IntentAwareSelfAttention(nn.Module):
     def __init__(self, emb_size, num_heads, dropout, attention_base_temp,
                  uncertainty_temp_scale, attention_logit_scale,
-                 attention_prob_power, transformer_temp_min,
-                 transformer_temp_max) -> None:
+                 intent_logit_bias_scale, attention_prob_power,
+                 transformer_temp_min, transformer_temp_max) -> None:
         super().__init__()
         if emb_size % num_heads != 0:
             num_heads = 1
@@ -1408,6 +1424,7 @@ class IntentAwareSelfAttention(nn.Module):
         self.attention_base_temp = attention_base_temp
         self.uncertainty_temp_scale = uncertainty_temp_scale
         self.attention_logit_scale = attention_logit_scale
+        self.intent_logit_bias_scale = intent_logit_bias_scale
         self.attention_prob_power = attention_prob_power
         self.transformer_temp_min = transformer_temp_min
         self.transformer_temp_max = transformer_temp_max
@@ -1422,7 +1439,8 @@ class IntentAwareSelfAttention(nn.Module):
                 his_emb,
                 src_key_padding_mask,
                 src_mask=None,
-                uncertainty=None):
+                uncertainty=None,
+                intent_assign=None):
         batch_size, seq_len, _ = his_emb.size()
         query = self.q_proj(his_emb).reshape(
             batch_size, seq_len, self.num_heads,
@@ -1437,6 +1455,14 @@ class IntentAwareSelfAttention(nn.Module):
                                    key.transpose(-1, -2)) / math.sqrt(
                                        self.head_dim)
         attn_logits = attn_logits * self.attention_logit_scale
+
+        if intent_assign is not None and self.intent_logit_bias_scale != 0:
+            intent_sim = torch.matmul(intent_assign,
+                                      intent_assign.transpose(-1, -2))
+            intent_center = 1.0 / max(intent_assign.size(-1), 1)
+            intent_bias = (intent_sim - intent_center) * \
+                self.intent_logit_bias_scale
+            attn_logits = attn_logits + intent_bias.unsqueeze(1)
 
         attn_mask = src_key_padding_mask.unsqueeze(1).unsqueeze(2)
         if src_mask is not None:
@@ -1470,7 +1496,7 @@ class IntentAwareSelfAttention(nn.Module):
 class IntentAwareTransformerLayer(nn.Module):
     def __init__(self, emb_size, num_heads, dropout, attention_base_temp,
                  uncertainty_temp_scale, attention_logit_scale,
-                 attention_prob_power, transformer_temp_min,
+                 intent_logit_bias_scale, attention_prob_power, transformer_temp_min,
                  transformer_temp_max) -> None:
         super().__init__()
         self.self_attn = IntentAwareSelfAttention(
@@ -1480,6 +1506,7 @@ class IntentAwareTransformerLayer(nn.Module):
             attention_base_temp=attention_base_temp,
             uncertainty_temp_scale=uncertainty_temp_scale,
             attention_logit_scale=attention_logit_scale,
+            intent_logit_bias_scale=intent_logit_bias_scale,
             attention_prob_power=attention_prob_power,
             transformer_temp_min=transformer_temp_min,
             transformer_temp_max=transformer_temp_max)
@@ -1494,9 +1521,10 @@ class IntentAwareTransformerLayer(nn.Module):
                 his_emb,
                 src_key_padding_mask,
                 src_mask=None,
-                uncertainty=None):
+                uncertainty=None,
+                intent_assign=None):
         attn_output = self.self_attn(his_emb, src_key_padding_mask, src_mask,
-                                     uncertainty)
+                                     uncertainty, intent_assign)
         his_emb = self.norm1(his_emb + self.dropout(attn_output))
         ffn_output = self.linear2(self.dropout(self.activation(
             self.linear1(his_emb))))
@@ -1507,7 +1535,8 @@ class IntentAwareTransformerLayer(nn.Module):
 class Transformer(nn.Module):
     def __init__(self, emb_size, num_heads, num_layers, dropout,
                  attention_base_temp, uncertainty_temp_scale,
-                 attention_logit_scale, attention_prob_power,
+                 attention_logit_scale, intent_logit_bias_scale,
+                 attention_prob_power,
                  transformer_temp_min, transformer_temp_max) -> None:
         super().__init__()
         self.layers = nn.ModuleList([
@@ -1518,6 +1547,7 @@ class Transformer(nn.Module):
                 attention_base_temp=attention_base_temp,
                 uncertainty_temp_scale=uncertainty_temp_scale,
                 attention_logit_scale=attention_logit_scale,
+                intent_logit_bias_scale=intent_logit_bias_scale,
                 attention_prob_power=attention_prob_power,
                 transformer_temp_min=transformer_temp_min,
                 transformer_temp_max=transformer_temp_max)
@@ -1528,9 +1558,10 @@ class Transformer(nn.Module):
                 his_emb: torch.Tensor,
                 src_key_padding_mask: torch.Tensor,
                 src_mask: torch.Tensor = None,
-                uncertainty: torch.Tensor = None):
+                uncertainty: torch.Tensor = None,
+                intent_assign: torch.Tensor = None):
         his_encoded = his_emb
         for layer in self.layers:
             his_encoded = layer(his_encoded, src_key_padding_mask, src_mask,
-                                uncertainty)
+                                uncertainty, intent_assign)
         return his_encoded
