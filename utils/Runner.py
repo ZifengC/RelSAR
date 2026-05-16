@@ -468,8 +468,6 @@ class SarRunner(BaseRunner):
                 'intent_proto_margin_violation', 'intent_assignment_reg'
             ],
             'belief': [
-                'belief_distance_raw_mean',
-                'belief_distance_squashed_mean',
                 'belief_entropy_mean', 'belief_uncertainty_mean',
                 'belief_uncertainty_early_mean',
                 'belief_uncertainty_mid_mean',
@@ -482,13 +480,8 @@ class SarRunner(BaseRunner):
             ],
             'cf': [
                 'cf_mask_mean', 'cf_necessity_mean', 'cf_potential_mean',
-                'cf_self_mean', 'cf_consistency_reg', 'rec_gate_entropy',
-                'src_gate_entropy', 'rec_same_gate_mean',
+                'cf_self_mean', 'cf_consistency_reg',
                 'rec_mix_mean', 'src_mix_mean',
-                'src_same_gate_mean'
-            ],
-            'path': [
-                'path_s2s', 'path_r2s', 'path_r2r', 'path_s2r',
                 'rec_same_delta_mean', 'rec_cross_delta_mean',
                 'src_same_delta_mean', 'src_cross_delta_mean',
                 'rec_cross_gate_mean', 'src_cross_gate_mean'

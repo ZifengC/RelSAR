@@ -11,6 +11,64 @@ from .layers import FullyConnectedLayer, feature_align, PositionalEmbedding, PLE
 
 
 class UniSAR(BaseModel):
+    BELIEF_MEAN_KEYS = [
+        'belief_uncertainty_mean',
+        'belief_entropy_mean',
+        'belief_confidence_mean',
+        'belief_variance_mean',
+        'belief_uncertainty_early_mean',
+        'belief_uncertainty_mid_mean',
+        'belief_uncertainty_late_mean',
+        'attention_temp_mean',
+        'attention_temp_early_mean',
+        'attention_temp_mid_mean',
+        'attention_temp_late_mean',
+        'belief_mass_mean',
+    ]
+    BELIEF_MAX_KEYS = ['attention_temp_max', 'belief_mass_max']
+    BELIEF_MIN_KEYS = ['attention_temp_min', 'belief_mass_min']
+    DIAGNOSTIC_KEYS = [
+        'intent_assignment_reg',
+        'intent_proto_sim_mean',
+        'intent_proto_sim_max',
+        'intent_proto_sim_min',
+        'intent_proto_margin_violation',
+        'cf_consistency_reg',
+        'intent_assign_entropy',
+        'intent_usage_entropy',
+        'intent_confidence',
+        'intent_usage_max',
+        'intent_residual_mean',
+        'belief_uncertainty_mean',
+        'belief_entropy_mean',
+        'belief_confidence_mean',
+        'belief_variance_mean',
+        'belief_uncertainty_early_mean',
+        'belief_uncertainty_mid_mean',
+        'belief_uncertainty_late_mean',
+        'attention_temp_mean',
+        'attention_temp_early_mean',
+        'attention_temp_mid_mean',
+        'attention_temp_late_mean',
+        'attention_temp_max',
+        'attention_temp_min',
+        'belief_mass_mean',
+        'belief_mass_max',
+        'belief_mass_min',
+        'cf_mask_mean',
+        'cf_necessity_mean',
+        'cf_potential_mean',
+        'cf_self_mean',
+        'rec_mix_mean',
+        'src_mix_mean',
+        'rec_same_delta_mean',
+        'rec_cross_delta_mean',
+        'src_same_delta_mean',
+        'src_cross_delta_mean',
+        'rec_cross_gate_mean',
+        'src_cross_gate_mean',
+    ]
+
     @staticmethod
     def parse_model_args(parser):
         parser.add_argument('--num_layers', type=int, default=1)
@@ -30,10 +88,6 @@ class UniSAR(BaseModel):
         parser.add_argument('--cf_consistency_weight',
                             type=float,
                             default=0.01)
-        parser.add_argument('--cf_sparsity_weight', type=float, default=0.0001)
-        parser.add_argument('--path_competition_weight',
-                            type=float,
-                            default=0.0)
         parser.add_argument('--intent_num', type=int, default=4)
         parser.add_argument('--intent_heads', type=int, default=2)
         parser.add_argument('--intent_dropout', type=float, default=0.1)
@@ -50,18 +104,10 @@ class UniSAR(BaseModel):
                             type=float,
                             default=0.2)
         parser.add_argument('--intent_var_min', type=float, default=1e-4)
-        parser.add_argument('--rec_cross_alpha', type=float, default=0.25)
         parser.add_argument('--belief_init_var', type=float, default=1.0)
         parser.add_argument('--belief_init_mass', type=float, default=1.0)
-        parser.add_argument('--belief_decay', type=float, default=0.9)
         parser.add_argument('--belief_temp', type=float, default=0.5)
         parser.add_argument('--belief_prior_weight', type=float, default=1.0)
-        parser.add_argument('--belief_distance_scale',
-                            type=float,
-                            default=2.0)
-        parser.add_argument('--belief_distance_power',
-                            type=float,
-                            default=1.5)
         parser.add_argument('--attention_base_temp', type=float, default=1.0)
         parser.add_argument('--uncertainty_temp_scale',
                             type=float,
@@ -91,22 +137,16 @@ class UniSAR(BaseModel):
         self.intent_temp = args.intent_temp
         self.cf_gate_scale = args.cf_gate_scale
         self.cf_consistency_weight = args.cf_consistency_weight
-        self.cf_sparsity_weight = args.cf_sparsity_weight
-        self.path_competition_weight = args.path_competition_weight
         self.intent_num = args.intent_num
         self.intent_assignment_weight = args.intent_assignment_weight
         self.intent_entropy_target = args.intent_entropy_target
         self.intent_confidence_target = args.intent_confidence_target
         self.intent_diversity_margin = args.intent_diversity_margin
         self.intent_var_min = args.intent_var_min
-        self.rec_cross_alpha = args.rec_cross_alpha
         self.belief_init_var = args.belief_init_var
         self.belief_init_mass = args.belief_init_mass
-        self.belief_decay = args.belief_decay
         self.belief_temp = args.belief_temp
         self.belief_prior_weight = args.belief_prior_weight
-        self.belief_distance_scale = args.belief_distance_scale
-        self.belief_distance_power = args.belief_distance_power
         self.attention_base_temp = args.attention_base_temp
         self.uncertainty_temp_scale = args.uncertainty_temp_scale
         self.attention_logit_scale = args.attention_logit_scale
@@ -180,12 +220,10 @@ class UniSAR(BaseModel):
             num_intents=self.intent_num,
             num_heads=args.intent_heads,
             dropout=args.intent_dropout)
-        mix_init = min(max(args.rec_cross_alpha, 1e-4), 1.0 - 1e-4)
-        mix_logit = math.log(mix_init / (1.0 - mix_init))
-        self.rec_src_mix = nn.Parameter(torch.tensor(float(mix_logit)))
-        self.src_cross_mix = nn.Parameter(torch.tensor(float(mix_logit)))
-        self.uncertainty_norm = nn.LayerNorm(2)
-        self.uncertainty_fusion = nn.Linear(2, 1)
+        self.rec_src_mix = nn.Parameter(torch.tensor(0.0))
+        self.src_cross_mix = nn.Parameter(torch.tensor(0.0))
+        self.uncertainty_norm = nn.LayerNorm(1)
+        self.uncertainty_fusion = nn.Linear(1, 1)
         self.rec_his_attn_pooling = Target_Attention(self.item_size,
                                                      self.item_size)
         self.src_his_attn_pooling = Target_Attention(self.item_size,
@@ -351,8 +389,6 @@ class UniSAR(BaseModel):
         posterior_trace = seq_emb.new_zeros(batch_size, seq_len,
                                             self.intent_num)
         uncertainty = seq_emb.new_zeros(batch_size, seq_len)
-        distance_raw_trace = seq_emb.new_zeros(batch_size, seq_len)
-        distance_squashed_trace = seq_emb.new_zeros(batch_size, seq_len)
         entropy_trace = seq_emb.new_zeros(batch_size, seq_len)
         confidence_trace = seq_emb.new_zeros(batch_size, seq_len)
         var_trace = seq_emb.new_zeros(batch_size, seq_len)
@@ -365,7 +401,6 @@ class UniSAR(BaseModel):
         mass = seq_emb.new_full((batch_size, self.intent_num),
                                 self.belief_init_mass)
         valid = ~mask
-        decay = self.belief_decay
         belief_temp = max(self.belief_temp, 1e-6)
 
         for t in range(seq_len):
@@ -375,26 +410,22 @@ class UniSAR(BaseModel):
 
             token_state = seq_emb[:, t, :].unsqueeze(1)
             delta = token_state - mu
-            dist = (delta.pow(2) / var.clamp_min(self.intent_var_min)).mean(
-                dim=-1)
-            dist = self.belief_distance_scale * dist.clamp_min(1e-8).pow(
-                self.belief_distance_power)
+            assignment_cost = (
+                delta.pow(2) / var.clamp_min(self.intent_var_min)).mean(dim=-1)
             log_prior = torch.log(prior_assign[:, t, :].clamp_min(1e-8))
-            scores = -dist / belief_temp + self.belief_prior_weight * log_prior
+            scores = -assignment_cost / belief_temp + \
+                self.belief_prior_weight * log_prior
             posterior = torch.softmax(scores, dim=-1)
             posterior = posterior * valid_t.unsqueeze(-1).float()
             posterior = posterior / posterior.sum(dim=-1,
                                                   keepdim=True).clamp_min(1e-8)
             posterior_trace[:, t, :] = posterior
 
-            distance_unc = (posterior * dist).sum(dim=-1)
             entropy_unc = -(posterior.clamp_min(1e-8) *
                             posterior.clamp_min(1e-8).log()).sum(dim=-1)
             if self.intent_num > 1:
                 entropy_unc = entropy_unc / math.log(self.intent_num)
-            distance_squashed = torch.tanh(distance_unc)
-            features = torch.stack([distance_squashed, entropy_unc],
-                                   dim=-1)
+            features = entropy_unc.unsqueeze(-1)
             fused_uncertainty = torch.sigmoid(
                 self.uncertainty_fusion(self.uncertainty_norm(features))).squeeze(-1)
             attention_temp = self.attention_base_temp + \
@@ -404,9 +435,6 @@ class UniSAR(BaseModel):
                 max=self.transformer_temp_max)
 
             uncertainty[:, t] = fused_uncertainty * valid_t.float()
-            distance_raw_trace[:, t] = distance_unc * valid_t.float()
-            distance_squashed_trace[:, t] = distance_squashed * \
-                valid_t.float()
             entropy_trace[:, t] = entropy_unc * valid_t.float()
             confidence_trace[:, t] = posterior.max(dim=-1).values * \
                 valid_t.float()
@@ -419,24 +447,20 @@ class UniSAR(BaseModel):
             prev_mass = mass
             prev_mu = mu
             prev_var = var
-            mass = decay * mass + posterior
+            mass = mass + posterior
             mass_safe = mass.unsqueeze(-1).clamp_min(1e-8)
             weighted_token = posterior_update * token_state
             weighted_token_sq = posterior_update * token_state_sq
-            mu = (decay * prev_mass.unsqueeze(-1) * prev_mu +
+            mu = (prev_mass.unsqueeze(-1) * prev_mu +
                   weighted_token) / mass_safe
             second_old = prev_var + prev_mu.pow(2)
-            second = (decay * prev_mass.unsqueeze(-1) * second_old +
+            second = (prev_mass.unsqueeze(-1) * second_old +
                       weighted_token_sq) / mass_safe
             var = (second - mu.pow(2)).clamp_min(self.intent_var_min)
 
         diagnostics = {
             'belief_uncertainty_mean':
             self.safe_masked_mean(uncertainty, valid),
-            'belief_distance_raw_mean':
-            self.safe_masked_mean(distance_raw_trace, valid),
-            'belief_distance_squashed_mean':
-            self.safe_masked_mean(distance_squashed_trace, valid),
             'belief_entropy_mean':
             self.safe_masked_mean(entropy_trace, valid),
             'belief_confidence_mean':
@@ -514,6 +538,55 @@ class UniSAR(BaseModel):
             proto_sim_max, proto_sim_min, proto_margin_violation, \
             usage_entropy
 
+    def aggregate_belief_diagnostics(self, diagnostics):
+        aggregate = {}
+        for key in self.BELIEF_MEAN_KEYS:
+            aggregate[key] = sum(d[key] for d in diagnostics) / len(diagnostics)
+        for key in self.BELIEF_MAX_KEYS:
+            aggregate[key] = torch.stack([d[key] for d in diagnostics]).max()
+        for key in self.BELIEF_MIN_KEYS:
+            aggregate[key] = torch.stack([d[key] for d in diagnostics]).min()
+        return aggregate
+
+    def build_regularization(self, intent_diagnostics, belief_diagnostics,
+                             device):
+        zero = torch.tensor(0.0, device=device)
+        regularization = {
+            'intent_assignment_reg':
+            intent_diagnostics['intent_assignment_reg'],
+            'intent_proto_sim_mean':
+            intent_diagnostics['intent_proto_sim_mean'],
+            'intent_proto_sim_max':
+            intent_diagnostics['intent_proto_sim_max'],
+            'intent_proto_sim_min':
+            intent_diagnostics['intent_proto_sim_min'],
+            'intent_proto_margin_violation':
+            intent_diagnostics['intent_proto_margin_violation'],
+            'intent_assign_entropy':
+            intent_diagnostics['intent_assign_entropy'],
+            'intent_usage_entropy':
+            intent_diagnostics['intent_usage_entropy'],
+            'intent_confidence':
+            intent_diagnostics['intent_confidence'],
+            'intent_usage_max':
+            intent_diagnostics['intent_usage_max'],
+            'intent_residual_mean':
+            intent_diagnostics['intent_residual_mean'],
+            'cf_consistency_reg':
+            zero
+        }
+        regularization.update(self.aggregate_belief_diagnostics(
+            belief_diagnostics))
+        for key in [
+                'cf_mask_mean', 'cf_necessity_mean', 'cf_potential_mean',
+                'cf_self_mean', 'rec_mix_mean', 'src_mix_mean',
+                'rec_same_delta_mean', 'rec_cross_delta_mean',
+                'src_same_delta_mean', 'src_cross_delta_mean',
+                'rec_cross_gate_mean', 'src_cross_gate_mean'
+        ]:
+            regularization[key] = zero
+        return regularization
+
     def compute_counterfactual_gates(self, full_pred, wo_cross_pred,
                                      wo_same_pred):
         cross_delta = F.relu(full_pred - wo_cross_pred).squeeze(-1)
@@ -521,7 +594,7 @@ class UniSAR(BaseModel):
         gate_logits = self.cf_gate_scale * torch.stack([same_delta, cross_delta],
                                                        dim=-1)
         gate_probs = torch.softmax(gate_logits, dim=-1)
-        return gate_probs[:, 0], gate_probs[:, 1], gate_probs
+        return gate_probs[:, 0], gate_probs[:, 1]
 
     def compute_cross_supplement_gates(self, full_pred, wo_cross_pred,
                                        wo_same_pred):
@@ -532,7 +605,7 @@ class UniSAR(BaseModel):
         gate_probs = torch.softmax(gate_logits, dim=-1)
         cross_gate = gate_probs[:, 1]
         same_gate = torch.ones_like(cross_gate)
-        return same_gate, cross_gate, gate_probs
+        return same_gate, cross_gate
 
     def forward(self,
                 user,
@@ -606,140 +679,11 @@ class UniSAR(BaseModel):
             src2rec, rec2rec, rec_his_mask, rec2src, src2src, src_his_mask
         ]
 
-        regularization = {
-            'cf_sparsity_reg': torch.tensor(0.0, device=all_his.device),
-            'path_competition_reg': torch.tensor(0.0, device=all_his.device),
-            'intent_assignment_reg':
-            intent_diagnostics['intent_assignment_reg'],
-            'intent_proto_sim_mean':
-            intent_diagnostics['intent_proto_sim_mean'],
-            'intent_proto_sim_max':
-            intent_diagnostics['intent_proto_sim_max'],
-            'intent_proto_sim_min':
-            intent_diagnostics['intent_proto_sim_min'],
-            'intent_proto_margin_violation':
-            intent_diagnostics['intent_proto_margin_violation'],
-            'cf_consistency_reg':
-            torch.tensor(0.0, device=all_his.device),
-            'intent_assign_entropy':
-            intent_diagnostics['intent_assign_entropy'],
-            'intent_usage_entropy':
-            intent_diagnostics['intent_usage_entropy'],
-            'intent_confidence':
-            intent_diagnostics['intent_confidence'],
-            'intent_usage_max':
-            intent_diagnostics['intent_usage_max'],
-            'intent_residual_mean':
-            intent_diagnostics['intent_residual_mean'],
-            'belief_uncertainty_mean':
-            (global_belief_diagnostics['belief_uncertainty_mean'] +
-             rec_belief_diagnostics['belief_uncertainty_mean'] +
-             src_belief_diagnostics['belief_uncertainty_mean']) / 3.0,
-            'belief_distance_raw_mean':
-            (global_belief_diagnostics['belief_distance_raw_mean'] +
-             rec_belief_diagnostics['belief_distance_raw_mean'] +
-             src_belief_diagnostics['belief_distance_raw_mean']) / 3.0,
-            'belief_distance_squashed_mean':
-            (global_belief_diagnostics['belief_distance_squashed_mean'] +
-             rec_belief_diagnostics['belief_distance_squashed_mean'] +
-             src_belief_diagnostics['belief_distance_squashed_mean']) / 3.0,
-            'belief_entropy_mean':
-            (global_belief_diagnostics['belief_entropy_mean'] +
-             rec_belief_diagnostics['belief_entropy_mean'] +
-             src_belief_diagnostics['belief_entropy_mean']) / 3.0,
-            'belief_confidence_mean':
-            (global_belief_diagnostics['belief_confidence_mean'] +
-             rec_belief_diagnostics['belief_confidence_mean'] +
-             src_belief_diagnostics['belief_confidence_mean']) / 3.0,
-            'belief_variance_mean':
-            (global_belief_diagnostics['belief_variance_mean'] +
-             rec_belief_diagnostics['belief_variance_mean'] +
-             src_belief_diagnostics['belief_variance_mean']) / 3.0,
-            'belief_uncertainty_early_mean':
-            (global_belief_diagnostics['belief_uncertainty_early_mean'] +
-             rec_belief_diagnostics['belief_uncertainty_early_mean'] +
-             src_belief_diagnostics['belief_uncertainty_early_mean']) / 3.0,
-            'belief_uncertainty_mid_mean':
-            (global_belief_diagnostics['belief_uncertainty_mid_mean'] +
-             rec_belief_diagnostics['belief_uncertainty_mid_mean'] +
-             src_belief_diagnostics['belief_uncertainty_mid_mean']) / 3.0,
-            'belief_uncertainty_late_mean':
-            (global_belief_diagnostics['belief_uncertainty_late_mean'] +
-             rec_belief_diagnostics['belief_uncertainty_late_mean'] +
-             src_belief_diagnostics['belief_uncertainty_late_mean']) / 3.0,
-            'attention_temp_mean':
-            (global_belief_diagnostics['attention_temp_mean'] +
-             rec_belief_diagnostics['attention_temp_mean'] +
-             src_belief_diagnostics['attention_temp_mean']) / 3.0,
-            'attention_temp_early_mean':
-            (global_belief_diagnostics['attention_temp_early_mean'] +
-             rec_belief_diagnostics['attention_temp_early_mean'] +
-             src_belief_diagnostics['attention_temp_early_mean']) / 3.0,
-            'attention_temp_mid_mean':
-            (global_belief_diagnostics['attention_temp_mid_mean'] +
-             rec_belief_diagnostics['attention_temp_mid_mean'] +
-             src_belief_diagnostics['attention_temp_mid_mean']) / 3.0,
-            'attention_temp_late_mean':
-            (global_belief_diagnostics['attention_temp_late_mean'] +
-             rec_belief_diagnostics['attention_temp_late_mean'] +
-             src_belief_diagnostics['attention_temp_late_mean']) / 3.0,
-            'attention_temp_max':
-            torch.max(
-                torch.max(global_belief_diagnostics['attention_temp_max'],
-                          rec_belief_diagnostics['attention_temp_max']),
-                src_belief_diagnostics['attention_temp_max']),
-            'attention_temp_min':
-            torch.min(
-                torch.min(global_belief_diagnostics['attention_temp_min'],
-                          rec_belief_diagnostics['attention_temp_min']),
-                src_belief_diagnostics['attention_temp_min']),
-            'belief_mass_mean':
-            (global_belief_diagnostics['belief_mass_mean'] +
-             rec_belief_diagnostics['belief_mass_mean'] +
-             src_belief_diagnostics['belief_mass_mean']) / 3.0,
-            'belief_mass_max':
-            torch.max(
-                torch.max(global_belief_diagnostics['belief_mass_max'],
-                          rec_belief_diagnostics['belief_mass_max']),
-                src_belief_diagnostics['belief_mass_max']),
-            'belief_mass_min':
-            torch.min(
-                torch.min(global_belief_diagnostics['belief_mass_min'],
-                          rec_belief_diagnostics['belief_mass_min']),
-                src_belief_diagnostics['belief_mass_min']),
-            'cf_mask_mean':
-            torch.tensor(0.0, device=all_his.device),
-            'cf_necessity_mean':
-            torch.tensor(0.0, device=all_his.device),
-            'cf_potential_mean':
-            torch.tensor(0.0, device=all_his.device),
-            'cf_self_mean':
-            torch.tensor(0.0, device=all_his.device),
-            'rec_mix_mean':
-            torch.tensor(0.0, device=all_his.device),
-            'src_mix_mean':
-            torch.tensor(0.0, device=all_his.device),
-            'path_s2s':
-            torch.tensor(0.0, device=all_his.device),
-            'path_r2s':
-            torch.tensor(0.0, device=all_his.device),
-            'path_r2r':
-            torch.tensor(0.0, device=all_his.device),
-            'path_s2r':
-            torch.tensor(0.0, device=all_his.device),
-            'rec_same_delta_mean':
-            torch.tensor(0.0, device=all_his.device),
-            'rec_cross_delta_mean':
-            torch.tensor(0.0, device=all_his.device),
-            'src_same_delta_mean':
-            torch.tensor(0.0, device=all_his.device),
-            'src_cross_delta_mean':
-            torch.tensor(0.0, device=all_his.device),
-            'rec_cross_gate_mean':
-            torch.tensor(0.0, device=all_his.device),
-            'src_cross_gate_mean':
-            torch.tensor(0.0, device=all_his.device)
-        }
+        regularization = self.build_regularization(
+            intent_diagnostics, [
+                global_belief_diagnostics, rec_belief_diagnostics,
+                src_belief_diagnostics
+            ], all_his.device)
 
         feature_list = [
             rec2rec, src2rec, rec_his_mask, src2src, rec2src, src_his_mask,
@@ -831,9 +775,9 @@ class UniSAR(BaseModel):
                 domain='src',
                 query_emb=repeated_query_emb)
 
-        rec_same_gate, rec_cross_gate, rec_gate_probs = self.compute_cross_supplement_gates(
+        rec_same_gate, rec_cross_gate = self.compute_cross_supplement_gates(
             rec_full_pred, rec_wo_cross_pred, rec_wo_same_pred)
-        src_same_gate, src_cross_gate, src_gate_probs = self.compute_counterfactual_gates(
+        src_same_gate, src_cross_gate = self.compute_counterfactual_gates(
             src_full_pred, src_wo_cross_pred, src_wo_same_pred)
         rec_same_delta = F.relu(rec_full_pred - rec_wo_same_pred).squeeze(-1)
         rec_cross_delta = F.relu(rec_full_pred - rec_wo_cross_pred).squeeze(-1)
@@ -846,40 +790,12 @@ class UniSAR(BaseModel):
             F.relu(src_wo_cross_pred - src_full_pred).mean() +
             F.relu(src_wo_same_pred - src_full_pred).mean())
 
-        path_strengths = all_his.new_zeros((rec_same_gate.size(0), 4),
-                                           dtype=rec_same_gate.dtype,
-                                           device=rec_same_gate.device)
-        path_strengths[:, 0] = src_same_gate
-        path_strengths[:, 1] = src_cross_gate
-        path_strengths[:, 2] = rec_same_gate
-        path_strengths[:, 3] = rec_cross_gate
-        path_dist = path_strengths / path_strengths.sum(dim=-1,
-                                                        keepdim=True).clamp_min(1e-8)
-        rec_gate_entropy = -(rec_gate_probs.clamp_min(1e-8) *
-                             rec_gate_probs.clamp_min(1e-8).log()).sum(
-                                 dim=-1).mean()
-        src_gate_entropy = -(src_gate_probs.clamp_min(1e-8) *
-                             src_gate_probs.clamp_min(1e-8).log()).sum(
-                                 dim=-1).mean()
-        regularization['cf_sparsity_reg'] = 0.5 * (rec_gate_entropy +
-                                                   src_gate_entropy)
-        regularization['path_competition_reg'] = -(
-            path_dist.clamp_min(1e-8) * path_dist.clamp_min(1e-8).log()
-        ).sum(dim=-1).mean()
         regularization['cf_mask_mean'] = 0.5 * (
             rec_cross_gate.mean() + src_cross_gate.mean())
         regularization['cf_necessity_mean'] = rec_cross_gate.mean()
         regularization['cf_potential_mean'] = src_cross_gate.mean()
         regularization['cf_self_mean'] = 0.5 * (
             rec_same_gate.mean() + src_same_gate.mean())
-        regularization['rec_gate_entropy'] = rec_gate_entropy
-        regularization['src_gate_entropy'] = src_gate_entropy
-        regularization['rec_same_gate_mean'] = rec_same_gate.mean()
-        regularization['src_same_gate_mean'] = src_same_gate.mean()
-        regularization['path_s2s'] = path_strengths[:, 0].mean()
-        regularization['path_r2s'] = path_strengths[:, 1].mean()
-        regularization['path_r2r'] = path_strengths[:, 2].mean()
-        regularization['path_s2r'] = path_strengths[:, 3].mean()
         regularization['rec_same_delta_mean'] = rec_same_delta.mean()
         regularization['rec_cross_delta_mean'] = rec_cross_delta.mean()
         regularization['src_same_delta_mean'] = src_same_delta.mean()
@@ -932,6 +848,46 @@ class UniSAR(BaseModel):
                 ], -1))[1]
             return self.src_fc_layer(output)
 
+    def add_auxiliary_losses(self, inputs, q_i_align_used, his_cl_used,
+                             loss_dict, total_loss):
+        if self.q_i_cl_weight > 0:
+            align_neg_item, align_neg_query = inputs['align_neg_item'], inputs[
+                'align_neg_query']
+            query_emb, click_item_mask, q_click_item_emb = q_i_align_used
+
+            align_neg_items_emb = self.session_embedding.get_item_emb(
+                align_neg_item)
+            align_neg_querys_emb = self.session_embedding.get_query_emb(
+                align_neg_query)
+            align_loss = self.feature_alignment(
+                [align_neg_items_emb, align_neg_querys_emb], query_emb,
+                click_item_mask, q_click_item_emb)
+            loss_dict['q_i_cl_loss'] = align_loss.clone()
+            total_loss += self.q_i_cl_weight * align_loss
+
+        if self.his_cl_weight > 0:
+            src2rec, rec2rec, rec_his_mask,\
+                rec2src, src2src, src_his_mask = his_cl_used
+            rec_his_cl_loss = self.rec_his_cl(src2rec, rec2rec, rec_his_mask)
+            src_his_cl_loss = self.src_his_cl(rec2src, src2src, src_his_mask)
+
+            his_cl_loss = rec_his_cl_loss + src_his_cl_loss
+            loss_dict['his_cl_loss'] = his_cl_loss.clone()
+            total_loss += self.his_cl_weight * his_cl_loss
+
+        return total_loss
+
+    def finalize_loss_dict(self, loss_dict, total_loss, regularization):
+        for key in self.DIAGNOSTIC_KEYS:
+            loss_dict[key] = regularization[key].clone()
+
+        total_loss += self.intent_assignment_weight * regularization[
+            'intent_assignment_reg']
+        total_loss += self.cf_consistency_weight * regularization[
+            'cf_consistency_reg']
+        loss_dict['total_loss'] = total_loss
+        return loss_dict
+
     def rec_loss(self, inputs):
         user, all_his, all_his_type, pos_item, neg_items = inputs[
             'user'], inputs['all_his'], inputs['all_his_type'], inputs[
@@ -955,133 +911,9 @@ class UniSAR(BaseModel):
         total_loss = self.loss_fn(logits, labels)
         loss_dict = {}
         loss_dict['click_loss'] = total_loss.clone()
-
-        if self.q_i_cl_weight > 0:
-            align_neg_item, align_neg_query = inputs['align_neg_item'], inputs[
-                'align_neg_query']
-            query_emb, click_item_mask, q_click_item_emb = q_i_align_used
-
-            align_neg_items_emb = self.session_embedding.get_item_emb(
-                align_neg_item)
-            align_neg_querys_emb = self.session_embedding.get_query_emb(
-                align_neg_query)
-            align_loss = self.feature_alignment(
-                [align_neg_items_emb, align_neg_querys_emb], query_emb,
-                click_item_mask, q_click_item_emb)
-            loss_dict['q_i_cl_loss'] = align_loss.clone()
-
-            total_loss += self.q_i_cl_weight * align_loss
-
-        if self.his_cl_weight > 0:
-            src2rec, rec2rec, rec_his_mask,\
-                rec2src, src2src, src_his_mask = his_cl_used
-            rec_his_cl_loss = self.rec_his_cl(src2rec, rec2rec, rec_his_mask)
-
-            src_his_cl_loss = self.src_his_cl(rec2src, src2src, src_his_mask)
-
-            his_cl_loss = rec_his_cl_loss + src_his_cl_loss
-            loss_dict['his_cl_loss'] = his_cl_loss.clone()
-
-            total_loss += self.his_cl_weight * his_cl_loss
-
-        loss_dict['intent_assignment_reg'] = regularization[
-            'intent_assignment_reg'].clone()
-        loss_dict['intent_proto_sim_mean'] = regularization[
-            'intent_proto_sim_mean'].clone()
-        loss_dict['intent_proto_sim_max'] = regularization[
-            'intent_proto_sim_max'].clone()
-        loss_dict['intent_proto_sim_min'] = regularization[
-            'intent_proto_sim_min'].clone()
-        loss_dict['intent_proto_margin_violation'] = regularization[
-            'intent_proto_margin_violation'].clone()
-        loss_dict['cf_consistency_reg'] = regularization[
-            'cf_consistency_reg'].clone()
-        loss_dict['intent_assign_entropy'] = regularization[
-            'intent_assign_entropy'].clone()
-        loss_dict['intent_usage_entropy'] = regularization[
-            'intent_usage_entropy'].clone()
-        loss_dict['intent_confidence'] = regularization[
-            'intent_confidence'].clone()
-        loss_dict['intent_usage_max'] = regularization[
-            'intent_usage_max'].clone()
-        loss_dict['intent_residual_mean'] = regularization[
-            'intent_residual_mean'].clone()
-        loss_dict['belief_uncertainty_mean'] = regularization[
-            'belief_uncertainty_mean'].clone()
-        loss_dict['belief_distance_raw_mean'] = regularization[
-            'belief_distance_raw_mean'].clone()
-        loss_dict['belief_distance_squashed_mean'] = regularization[
-            'belief_distance_squashed_mean'].clone()
-        loss_dict['belief_entropy_mean'] = regularization[
-            'belief_entropy_mean'].clone()
-        loss_dict['belief_confidence_mean'] = regularization[
-            'belief_confidence_mean'].clone()
-        loss_dict['belief_variance_mean'] = regularization[
-            'belief_variance_mean'].clone()
-        loss_dict['belief_uncertainty_early_mean'] = regularization[
-            'belief_uncertainty_early_mean'].clone()
-        loss_dict['belief_uncertainty_mid_mean'] = regularization[
-            'belief_uncertainty_mid_mean'].clone()
-        loss_dict['belief_uncertainty_late_mean'] = regularization[
-            'belief_uncertainty_late_mean'].clone()
-        loss_dict['attention_temp_mean'] = regularization[
-            'attention_temp_mean'].clone()
-        loss_dict['attention_temp_early_mean'] = regularization[
-            'attention_temp_early_mean'].clone()
-        loss_dict['attention_temp_mid_mean'] = regularization[
-            'attention_temp_mid_mean'].clone()
-        loss_dict['attention_temp_late_mean'] = regularization[
-            'attention_temp_late_mean'].clone()
-        loss_dict['attention_temp_max'] = regularization[
-            'attention_temp_max'].clone()
-        loss_dict['attention_temp_min'] = regularization[
-            'attention_temp_min'].clone()
-        loss_dict['belief_mass_mean'] = regularization[
-            'belief_mass_mean'].clone()
-        loss_dict['belief_mass_max'] = regularization[
-            'belief_mass_max'].clone()
-        loss_dict['belief_mass_min'] = regularization[
-            'belief_mass_min'].clone()
-        loss_dict['cf_mask_mean'] = regularization['cf_mask_mean'].clone()
-        loss_dict['cf_necessity_mean'] = regularization[
-            'cf_necessity_mean'].clone()
-        loss_dict['cf_potential_mean'] = regularization[
-            'cf_potential_mean'].clone()
-        loss_dict['cf_self_mean'] = regularization['cf_self_mean'].clone()
-        loss_dict['rec_mix_mean'] = regularization['rec_mix_mean'].clone()
-        loss_dict['src_mix_mean'] = regularization['src_mix_mean'].clone()
-        loss_dict['rec_gate_entropy'] = regularization[
-            'rec_gate_entropy'].clone()
-        loss_dict['src_gate_entropy'] = regularization[
-            'src_gate_entropy'].clone()
-        loss_dict['rec_same_gate_mean'] = regularization[
-            'rec_same_gate_mean'].clone()
-        loss_dict['src_same_gate_mean'] = regularization[
-            'src_same_gate_mean'].clone()
-        loss_dict['path_s2s'] = regularization['path_s2s'].clone()
-        loss_dict['path_r2s'] = regularization['path_r2s'].clone()
-        loss_dict['path_r2r'] = regularization['path_r2r'].clone()
-        loss_dict['path_s2r'] = regularization['path_s2r'].clone()
-        loss_dict['rec_same_delta_mean'] = regularization[
-            'rec_same_delta_mean'].clone()
-        loss_dict['rec_cross_delta_mean'] = regularization[
-            'rec_cross_delta_mean'].clone()
-        loss_dict['src_same_delta_mean'] = regularization[
-            'src_same_delta_mean'].clone()
-        loss_dict['src_cross_delta_mean'] = regularization[
-            'src_cross_delta_mean'].clone()
-        loss_dict['rec_cross_gate_mean'] = regularization[
-            'rec_cross_gate_mean'].clone()
-        loss_dict['src_cross_gate_mean'] = regularization[
-            'src_cross_gate_mean'].clone()
-        total_loss += self.intent_assignment_weight * regularization[
-            'intent_assignment_reg']
-        total_loss += self.cf_consistency_weight * regularization[
-            'cf_consistency_reg']
-
-        loss_dict['total_loss'] = total_loss
-
-        return loss_dict
+        total_loss = self.add_auxiliary_losses(
+            inputs, q_i_align_used, his_cl_used, loss_dict, total_loss)
+        return self.finalize_loss_dict(loss_dict, total_loss, regularization)
 
     def rec_predict(self, inputs):
         user, all_his, all_his_type, pos_item, neg_items = inputs[
@@ -1092,7 +924,7 @@ class UniSAR(BaseModel):
         items_emb = self.session_embedding.get_item_emb(items)
         batch_size = items_emb.size(0)
 
-        user_feats, q_i_align_used, his_cl_used, _ = self.forward(
+        user_feats, _, _, _ = self.forward(
             user, all_his, all_his_type, items, items_emb, domain='rec')
 
         logits = self.inter_pred(user_feats, items_emb, domain="rec").reshape(
@@ -1133,134 +965,9 @@ class UniSAR(BaseModel):
         total_loss = self.loss_fn(logits, labels)
         loss_dict = {}
         loss_dict['click_loss'] = total_loss.clone()
-
-        if self.q_i_cl_weight > 0:
-            align_neg_item, align_neg_query = inputs['align_neg_item'], inputs[
-                'align_neg_query']
-            query_emb, click_item_mask, q_click_item_emb = q_i_align_used
-
-            align_neg_items_emb = self.session_embedding.get_item_emb(
-                align_neg_item)
-            align_neg_querys_emb = self.session_embedding.get_query_emb(
-                align_neg_query)
-            align_loss = self.feature_alignment(
-                [align_neg_items_emb, align_neg_querys_emb], query_emb,
-                click_item_mask, q_click_item_emb)
-            loss_dict['q_i_cl_loss'] = align_loss.clone()
-
-            total_loss += self.q_i_cl_weight * align_loss
-
-        if self.his_cl_weight > 0:
-            src2rec, rec2rec, rec_his_mask,\
-                rec2src, src2src, src_his_mask = his_cl_used
-
-            rec_his_cl_loss = self.rec_his_cl(src2rec, rec2rec, rec_his_mask)
-
-            src_his_cl_loss = self.src_his_cl(rec2src, src2src, src_his_mask)
-
-            his_cl_loss = rec_his_cl_loss + src_his_cl_loss
-            loss_dict['his_cl_loss'] = his_cl_loss.clone()
-
-            total_loss += self.his_cl_weight * his_cl_loss
-
-        loss_dict['intent_assignment_reg'] = regularization[
-            'intent_assignment_reg'].clone()
-        loss_dict['intent_proto_sim_mean'] = regularization[
-            'intent_proto_sim_mean'].clone()
-        loss_dict['intent_proto_sim_max'] = regularization[
-            'intent_proto_sim_max'].clone()
-        loss_dict['intent_proto_sim_min'] = regularization[
-            'intent_proto_sim_min'].clone()
-        loss_dict['intent_proto_margin_violation'] = regularization[
-            'intent_proto_margin_violation'].clone()
-        loss_dict['cf_consistency_reg'] = regularization[
-            'cf_consistency_reg'].clone()
-        loss_dict['intent_assign_entropy'] = regularization[
-            'intent_assign_entropy'].clone()
-        loss_dict['intent_usage_entropy'] = regularization[
-            'intent_usage_entropy'].clone()
-        loss_dict['intent_confidence'] = regularization[
-            'intent_confidence'].clone()
-        loss_dict['intent_usage_max'] = regularization[
-            'intent_usage_max'].clone()
-        loss_dict['intent_residual_mean'] = regularization[
-            'intent_residual_mean'].clone()
-        loss_dict['belief_uncertainty_mean'] = regularization[
-            'belief_uncertainty_mean'].clone()
-        loss_dict['belief_distance_raw_mean'] = regularization[
-            'belief_distance_raw_mean'].clone()
-        loss_dict['belief_distance_squashed_mean'] = regularization[
-            'belief_distance_squashed_mean'].clone()
-        loss_dict['belief_entropy_mean'] = regularization[
-            'belief_entropy_mean'].clone()
-        loss_dict['belief_confidence_mean'] = regularization[
-            'belief_confidence_mean'].clone()
-        loss_dict['belief_variance_mean'] = regularization[
-            'belief_variance_mean'].clone()
-        loss_dict['belief_uncertainty_early_mean'] = regularization[
-            'belief_uncertainty_early_mean'].clone()
-        loss_dict['belief_uncertainty_mid_mean'] = regularization[
-            'belief_uncertainty_mid_mean'].clone()
-        loss_dict['belief_uncertainty_late_mean'] = regularization[
-            'belief_uncertainty_late_mean'].clone()
-        loss_dict['attention_temp_mean'] = regularization[
-            'attention_temp_mean'].clone()
-        loss_dict['attention_temp_early_mean'] = regularization[
-            'attention_temp_early_mean'].clone()
-        loss_dict['attention_temp_mid_mean'] = regularization[
-            'attention_temp_mid_mean'].clone()
-        loss_dict['attention_temp_late_mean'] = regularization[
-            'attention_temp_late_mean'].clone()
-        loss_dict['attention_temp_max'] = regularization[
-            'attention_temp_max'].clone()
-        loss_dict['attention_temp_min'] = regularization[
-            'attention_temp_min'].clone()
-        loss_dict['belief_mass_mean'] = regularization[
-            'belief_mass_mean'].clone()
-        loss_dict['belief_mass_max'] = regularization[
-            'belief_mass_max'].clone()
-        loss_dict['belief_mass_min'] = regularization[
-            'belief_mass_min'].clone()
-        loss_dict['cf_mask_mean'] = regularization['cf_mask_mean'].clone()
-        loss_dict['cf_necessity_mean'] = regularization[
-            'cf_necessity_mean'].clone()
-        loss_dict['cf_potential_mean'] = regularization[
-            'cf_potential_mean'].clone()
-        loss_dict['cf_self_mean'] = regularization['cf_self_mean'].clone()
-        loss_dict['rec_mix_mean'] = regularization['rec_mix_mean'].clone()
-        loss_dict['src_mix_mean'] = regularization['src_mix_mean'].clone()
-        loss_dict['rec_gate_entropy'] = regularization[
-            'rec_gate_entropy'].clone()
-        loss_dict['src_gate_entropy'] = regularization[
-            'src_gate_entropy'].clone()
-        loss_dict['rec_same_gate_mean'] = regularization[
-            'rec_same_gate_mean'].clone()
-        loss_dict['src_same_gate_mean'] = regularization[
-            'src_same_gate_mean'].clone()
-        loss_dict['path_s2s'] = regularization['path_s2s'].clone()
-        loss_dict['path_r2s'] = regularization['path_r2s'].clone()
-        loss_dict['path_r2r'] = regularization['path_r2r'].clone()
-        loss_dict['path_s2r'] = regularization['path_s2r'].clone()
-        loss_dict['rec_same_delta_mean'] = regularization[
-            'rec_same_delta_mean'].clone()
-        loss_dict['rec_cross_delta_mean'] = regularization[
-            'rec_cross_delta_mean'].clone()
-        loss_dict['src_same_delta_mean'] = regularization[
-            'src_same_delta_mean'].clone()
-        loss_dict['src_cross_delta_mean'] = regularization[
-            'src_cross_delta_mean'].clone()
-        loss_dict['rec_cross_gate_mean'] = regularization[
-            'rec_cross_gate_mean'].clone()
-        loss_dict['src_cross_gate_mean'] = regularization[
-            'src_cross_gate_mean'].clone()
-        total_loss += self.intent_assignment_weight * regularization[
-            'intent_assignment_reg']
-        total_loss += self.cf_consistency_weight * regularization[
-            'cf_consistency_reg']
-
-        loss_dict['total_loss'] = total_loss
-
-        return loss_dict
+        total_loss = self.add_auxiliary_losses(
+            inputs, q_i_align_used, his_cl_used, loss_dict, total_loss)
+        return self.finalize_loss_dict(loss_dict, total_loss, regularization)
 
     def src_predict(self, inputs):
         user, all_his, all_his_type, pos_item, neg_items = inputs[
@@ -1274,7 +981,7 @@ class UniSAR(BaseModel):
         items_emb = self.session_embedding.get_item_emb(items)
         batch_size = items_emb.size(0)
 
-        user_feats, q_i_align_used, his_cl_used, _ = self.forward(
+        user_feats, _, _, _ = self.forward(
             user,
             all_his,
             all_his_type,
@@ -1386,9 +1093,7 @@ class TransAlign(nn.Module):
         batch_size = same_his_mean.size(0)
         N = 2 * batch_size
 
-        z = torch.cat([same_his_mean.squeeze(),
-                       diff_his_mean.squeeze()],
-                      dim=0)
+        z = torch.cat([same_his_mean, diff_his_mean], dim=0)
         sim = torch.mm(torch.mm(z, self.weight_matrix), z.T)
         sim = torch.tanh(sim) / self.infoNCE_temp
 

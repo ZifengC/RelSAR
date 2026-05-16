@@ -22,14 +22,10 @@ pred_hid_units: [200, 80, 1]
 intent_temp: 0.5
 intent_num: 8
 intent_var_min: 0.0001
-rec_cross_alpha: 0.05
 belief_init_var: 1.0
 belief_init_mass: 1.0
-belief_decay: 0.9
 belief_temp: 0.5
 belief_prior_weight: 1.0
-belief_distance_scale: 2.0
-belief_distance_power: 1.5
 attention_base_temp: 1.0
 uncertainty_temp_scale: 0.5
 attention_logit_scale: 1.5
@@ -39,8 +35,6 @@ transformer_temp_min: 0.7
 transformer_temp_max: 1.5
 cf_gate_scale: 10.0
 cf_consistency_weight: 0.01
-cf_sparsity_weight: 0.0
-path_competition_weight: 0.0
 intent_assignment_weight: 0.01
 intent_entropy_target: 0.5
 intent_confidence_target: 0.55
