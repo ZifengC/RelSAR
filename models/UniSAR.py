@@ -93,6 +93,7 @@ class UniSAR(BaseModel):
         parser.add_argument('--cf_consistency_weight',
                             type=float,
                             default=0.01)
+        parser.add_argument('--use_counterfactual', type=int, default=1)
         parser.add_argument('--intent_num', type=int, default=4)
         parser.add_argument('--intent_heads', type=int, default=2)
         parser.add_argument('--intent_dropout', type=float, default=0.1)
@@ -145,6 +146,7 @@ class UniSAR(BaseModel):
         self.intent_temp = args.intent_temp
         self.cf_gate_scale = args.cf_gate_scale
         self.cf_consistency_weight = args.cf_consistency_weight
+        self.use_counterfactual = bool(args.use_counterfactual)
         self.intent_num = args.intent_num
         self.intent_assignment_weight = args.intent_assignment_weight
         self.intent_entropy_target = args.intent_entropy_target
@@ -225,6 +227,17 @@ class UniSAR(BaseModel):
                                          hidden_dim=self.item_size,
                                          device=self.device,
                                          infoNCE_temp=self.his_cl_temp)
+
+        self.original_decoder_layer = nn.TransformerDecoderLayer(
+            d_model=self.item_size,
+            nhead=self.num_heads,
+            dim_feedforward=self.item_size,
+            dropout=self.dropout,
+            batch_first=True)
+        self.original_rec_cross_fusion = nn.TransformerDecoder(
+            self.original_decoder_layer, num_layers=self.num_layers)
+        self.original_src_cross_fusion = nn.TransformerDecoder(
+            self.original_decoder_layer, num_layers=self.num_layers)
 
         self.intent_discovery = LatentIntentDiscovery(
             emb_dim=self.item_size,
@@ -636,6 +649,36 @@ class UniSAR(BaseModel):
         same_gate = torch.ones_like(cross_gate)
         return same_gate, cross_gate
 
+    def apply_original_cross_fusion(self, rec2rec, src2rec, rec_his_mask,
+                                    src2src, rec2src, src_his_mask, user_emb,
+                                    items_emb):
+        rec_fusion_decoded = self.original_rec_cross_fusion(
+            tgt=rec2rec,
+            memory=src2rec,
+            tgt_key_padding_mask=rec_his_mask,
+            memory_key_padding_mask=rec_his_mask)
+        src_fusion_decoded = self.original_src_cross_fusion(
+            tgt=src2src,
+            memory=rec2src,
+            tgt_key_padding_mask=src_his_mask,
+            memory_key_padding_mask=src_his_mask)
+
+        if items_emb.dim() == 3:
+            feature_list = [
+                rec_fusion_decoded, rec_his_mask, src_fusion_decoded,
+                src_his_mask, user_emb
+            ]
+            repeat_feature_list, items_emb = self.repeat_feat(
+                feature_list, items_emb)
+            rec_fusion_decoded, rec_his_mask, src_fusion_decoded, \
+                src_his_mask, user_emb = repeat_feature_list
+
+        rec_fusion = self.rec_his_attn_pooling(rec_fusion_decoded, items_emb,
+                                               rec_his_mask)
+        src_fusion = self.src_his_attn_pooling(src_fusion_decoded, items_emb,
+                                               src_his_mask)
+        return [rec_fusion, src_fusion, user_emb]
+
     def forward(self,
                 user,
                 all_his,
@@ -727,6 +770,14 @@ class UniSAR(BaseModel):
                 global_belief_diagnostics, rec_belief_diagnostics,
                 src_belief_diagnostics
             ], all_his.device)
+
+        if not self.use_counterfactual:
+            regularization['cf_mask_mean'] = regularization[
+                'cf_mask_mean'].new_tensor(0.5)
+            user_feats = self.apply_original_cross_fusion(
+                rec2rec, src2rec, rec_his_mask, src2src, rec2src,
+                src_his_mask, user_emb, items_emb)
+            return user_feats, q_i_align_used, his_cl_used, regularization
 
         feature_list = [
             rec2rec, src2rec, rec_his_mask, src2src, rec2src, src_his_mask,
@@ -929,8 +980,9 @@ class UniSAR(BaseModel):
 
         total_loss += self.intent_assignment_weight * regularization[
             'intent_assignment_reg']
-        total_loss += self.cf_consistency_weight * regularization[
-            'cf_consistency_reg']
+        if self.use_counterfactual:
+            total_loss += self.cf_consistency_weight * regularization[
+                'cf_consistency_reg']
         loss_dict['total_loss'] = total_loss
         return loss_dict
 
