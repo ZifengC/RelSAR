@@ -228,26 +228,35 @@ class UniSAR(BaseModel):
                                          device=self.device,
                                          infoNCE_temp=self.his_cl_temp)
 
-        self.original_decoder_layer = nn.TransformerDecoderLayer(
-            d_model=self.item_size,
-            nhead=self.num_heads,
-            dim_feedforward=self.item_size,
-            dropout=self.dropout,
-            batch_first=True)
-        self.original_rec_cross_fusion = nn.TransformerDecoder(
-            self.original_decoder_layer, num_layers=self.num_layers)
-        self.original_src_cross_fusion = nn.TransformerDecoder(
-            self.original_decoder_layer, num_layers=self.num_layers)
+        if self.use_counterfactual:
+            self.original_decoder_layer = None
+            self.original_rec_cross_fusion = None
+            self.original_src_cross_fusion = None
+        else:
+            self.original_decoder_layer = nn.TransformerDecoderLayer(
+                d_model=self.item_size,
+                nhead=self.num_heads,
+                dim_feedforward=self.item_size,
+                dropout=self.dropout,
+                batch_first=True)
+            self.original_rec_cross_fusion = nn.TransformerDecoder(
+                self.original_decoder_layer, num_layers=self.num_layers)
+            self.original_src_cross_fusion = nn.TransformerDecoder(
+                self.original_decoder_layer, num_layers=self.num_layers)
 
         self.intent_discovery = LatentIntentDiscovery(
             emb_dim=self.item_size,
             num_intents=self.intent_num,
             num_heads=args.intent_heads,
             dropout=args.intent_dropout)
-        mix_init = min(max(args.rec_cross_alpha, 1e-4), 1.0 - 1e-4)
-        mix_logit = math.log(mix_init / (1.0 - mix_init))
-        self.rec_src_mix = nn.Parameter(torch.tensor(float(mix_logit)))
-        self.src_cross_mix = nn.Parameter(torch.tensor(float(mix_logit)))
+        if self.use_counterfactual:
+            mix_init = min(max(args.rec_cross_alpha, 1e-4), 1.0 - 1e-4)
+            mix_logit = math.log(mix_init / (1.0 - mix_init))
+            self.rec_src_mix = nn.Parameter(torch.tensor(float(mix_logit)))
+            self.src_cross_mix = nn.Parameter(torch.tensor(float(mix_logit)))
+        else:
+            self.rec_src_mix = None
+            self.src_cross_mix = None
         self.uncertainty_norm = nn.LayerNorm(1)
         self.uncertainty_fusion = nn.Linear(1, 1)
         self.rec_his_attn_pooling = Target_Attention(self.item_size,
