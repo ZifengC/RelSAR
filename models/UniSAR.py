@@ -16,10 +16,12 @@ class UniSAR(BaseModel):
         'belief_entropy_mean',
         'belief_confidence_mean',
         'belief_variance_mean',
+        'belief_uncertainty_std',
         'belief_uncertainty_early_mean',
         'belief_uncertainty_mid_mean',
         'belief_uncertainty_late_mean',
         'attention_temp_mean',
+        'attention_temp_std',
         'attention_temp_early_mean',
         'attention_temp_mid_mean',
         'attention_temp_late_mean',
@@ -43,10 +45,12 @@ class UniSAR(BaseModel):
         'belief_entropy_mean',
         'belief_confidence_mean',
         'belief_variance_mean',
+        'belief_uncertainty_std',
         'belief_uncertainty_early_mean',
         'belief_uncertainty_mid_mean',
         'belief_uncertainty_late_mean',
         'attention_temp_mean',
+        'attention_temp_std',
         'attention_temp_early_mean',
         'attention_temp_mid_mean',
         'attention_temp_late_mean',
@@ -67,6 +71,7 @@ class UniSAR(BaseModel):
         'src_cross_delta_mean',
         'rec_cross_gate_mean',
         'src_cross_gate_mean',
+        'cross_mix_effective_mean',
     ]
 
     @staticmethod
@@ -104,6 +109,7 @@ class UniSAR(BaseModel):
                             type=float,
                             default=0.2)
         parser.add_argument('--intent_var_min', type=float, default=1e-4)
+        parser.add_argument('--rec_cross_alpha', type=float, default=0.05)
         parser.add_argument('--belief_init_var', type=float, default=1.0)
         parser.add_argument('--belief_init_mass', type=float, default=1.0)
         parser.add_argument('--belief_temp', type=float, default=0.5)
@@ -145,6 +151,7 @@ class UniSAR(BaseModel):
         self.intent_confidence_target = args.intent_confidence_target
         self.intent_diversity_margin = args.intent_diversity_margin
         self.intent_var_min = args.intent_var_min
+        self.rec_cross_alpha = args.rec_cross_alpha
         self.belief_init_var = args.belief_init_var
         self.belief_init_mass = args.belief_init_mass
         self.belief_temp = args.belief_temp
@@ -224,8 +231,10 @@ class UniSAR(BaseModel):
             num_intents=self.intent_num,
             num_heads=args.intent_heads,
             dropout=args.intent_dropout)
-        self.rec_src_mix = nn.Parameter(torch.tensor(0.0))
-        self.src_cross_mix = nn.Parameter(torch.tensor(0.0))
+        mix_init = min(max(args.rec_cross_alpha, 1e-4), 1.0 - 1e-4)
+        mix_logit = math.log(mix_init / (1.0 - mix_init))
+        self.rec_src_mix = nn.Parameter(torch.tensor(float(mix_logit)))
+        self.src_cross_mix = nn.Parameter(torch.tensor(float(mix_logit)))
         self.uncertainty_norm = nn.LayerNorm(1)
         self.uncertainty_fusion = nn.Linear(1, 1)
         self.rec_his_attn_pooling = Target_Attention(self.item_size,
@@ -323,6 +332,12 @@ class UniSAR(BaseModel):
         if valid_values.numel() == 0:
             return values.new_tensor(0.0)
         return valid_values.mean()
+
+    def safe_masked_std(self, values, mask):
+        valid_values = values.masked_select(mask)
+        if valid_values.numel() <= 1:
+            return values.new_tensor(0.0)
+        return valid_values.std(unbiased=False)
 
     def compute_segment_means(self, values, valid_mask, prefix):
         seq_len = values.size(1)
@@ -432,8 +447,7 @@ class UniSAR(BaseModel):
             if self.use_uncertainty_attention:
                 features = entropy_unc.unsqueeze(-1)
                 fused_uncertainty = torch.sigmoid(
-                    self.uncertainty_fusion(
-                        self.uncertainty_norm(features))).squeeze(-1)
+                    self.uncertainty_fusion(features)).squeeze(-1)
                 attention_temp = self.attention_base_temp + \
                     self.uncertainty_temp_scale * fused_uncertainty
                 attention_temp = attention_temp.clamp(
@@ -471,6 +485,8 @@ class UniSAR(BaseModel):
         diagnostics = {
             'belief_uncertainty_mean':
             self.safe_masked_mean(uncertainty, valid),
+            'belief_uncertainty_std':
+            self.safe_masked_std(uncertainty, valid),
             'belief_entropy_mean':
             self.safe_masked_mean(entropy_trace, valid),
             'belief_confidence_mean':
@@ -479,6 +495,8 @@ class UniSAR(BaseModel):
             self.safe_masked_mean(var_trace, valid),
             'attention_temp_mean':
             self.safe_masked_mean(temp_trace, valid),
+            'attention_temp_std':
+            self.safe_masked_std(temp_trace, valid),
             'attention_temp_max':
             temp_trace.masked_select(valid).max()
             if valid.any() else seq_emb.new_tensor(self.attention_base_temp),
@@ -592,7 +610,8 @@ class UniSAR(BaseModel):
                 'cf_self_mean', 'rec_mix_mean', 'src_mix_mean',
                 'rec_same_delta_mean', 'rec_cross_delta_mean',
                 'src_same_delta_mean', 'src_cross_delta_mean',
-                'rec_cross_gate_mean', 'src_cross_gate_mean'
+                'rec_cross_gate_mean', 'src_cross_gate_mean',
+                'cross_mix_effective_mean'
         ]:
             regularization[key] = zero
         return regularization
@@ -841,6 +860,9 @@ class UniSAR(BaseModel):
             src_cross_candidate
         regularization['rec_mix_mean'] = rec_mix
         regularization['src_mix_mean'] = src_mix
+        regularization['cross_mix_effective_mean'] = 0.5 * (
+            (rec_mix * rec_cross_gate).mean() +
+            (src_mix * src_cross_gate).mean())
 
         user_feats = [rec_fusion, src_fusion, user_emb]
 

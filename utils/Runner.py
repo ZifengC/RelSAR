@@ -472,11 +472,13 @@ class SarRunner(BaseRunner):
                 'belief_uncertainty_early_mean',
                 'belief_uncertainty_mid_mean',
                 'belief_uncertainty_late_mean',
+                'belief_uncertainty_std',
                 'belief_confidence_mean', 'belief_variance_mean',
                 'attention_temp_mean', 'attention_temp_early_mean',
                 'attention_temp_mid_mean', 'attention_temp_late_mean',
-                'attention_temp_min', 'attention_temp_max', 'belief_mass_mean',
-                'belief_mass_min', 'belief_mass_max'
+                'attention_temp_std', 'attention_temp_min',
+                'attention_temp_max', 'belief_mass_mean', 'belief_mass_min',
+                'belief_mass_max'
             ],
             'cf': [
                 'cf_mask_mean', 'cf_necessity_mean', 'cf_potential_mean',
@@ -484,7 +486,8 @@ class SarRunner(BaseRunner):
                 'rec_mix_mean', 'src_mix_mean',
                 'rec_same_delta_mean', 'rec_cross_delta_mean',
                 'src_same_delta_mean', 'src_cross_delta_mean',
-                'rec_cross_gate_mean', 'src_cross_gate_mean'
+                'rec_cross_gate_mean', 'src_cross_gate_mean',
+                'cross_mix_effective_mean'
             ]
         }
 
