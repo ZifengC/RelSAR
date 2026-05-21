@@ -1,4 +1,5 @@
 import gc
+import inspect
 import logging
 import time
 from typing import Dict, List
@@ -98,12 +99,16 @@ class BaseRunner(object):
                                           lr=self.learning_rate,
                                           weight_decay=self.l2)
 
+        scheduler_kwargs = {
+            'mode': 'max',
+            'patience': self.patience,
+            'min_lr': self.min_lr
+        }
+        if 'verbose' in inspect.signature(
+                torch.optim.lr_scheduler.ReduceLROnPlateau).parameters:
+            scheduler_kwargs['verbose'] = True
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            self.optimizer,
-            mode='max',
-            patience=self.patience,
-            min_lr=self.min_lr,
-            verbose=True)
+            self.optimizer, **scheduler_kwargs)
 
     def getDataLoader(self, dataset: BaseDataSet, batch_size: int,
                       shuffle: bool) -> DataLoader:
@@ -151,10 +156,11 @@ class BaseRunner(object):
 
             if max(main_metric_results) == main_metric_results[-1]:
                 model.save_model()
-                test_result, _ = self.evaluate(model, 'test')
-                logging.info("Test Result:")
-                logging.info(test_result)
-                print("Test Result: {}".format(test_result))
+
+            test_result, _ = self.evaluate(model, 'test')
+            logging.info("Test Result:")
+            logging.info(test_result)
+            print("Test Result: {}".format(test_result))
 
             if self.early_stop > 0 and self.eval_termination(
                     main_metric_results):
