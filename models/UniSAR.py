@@ -11,67 +11,15 @@ from .layers import FullyConnectedLayer, feature_align, PositionalEmbedding, PLE
 
 
 class UniSAR(BaseModel):
-    BELIEF_MEAN_KEYS = [
-        'belief_uncertainty_mean',
-        'belief_entropy_mean',
-        'belief_confidence_mean',
-        'belief_variance_mean',
-        'belief_uncertainty_std',
-        'belief_uncertainty_early_mean',
-        'belief_uncertainty_mid_mean',
-        'belief_uncertainty_late_mean',
-        'attention_temp_mean',
-        'attention_temp_std',
-        'attention_temp_early_mean',
-        'attention_temp_mid_mean',
-        'attention_temp_late_mean',
-        'belief_mass_mean',
-    ]
-    BELIEF_MAX_KEYS = ['attention_temp_max', 'belief_mass_max']
-    BELIEF_MIN_KEYS = ['attention_temp_min', 'belief_mass_min']
     DIAGNOSTIC_KEYS = [
-        'intent_assignment_reg',
-        'intent_proto_sim_mean',
-        'intent_proto_sim_max',
-        'intent_proto_sim_min',
-        'intent_proto_margin_violation',
-        'cf_consistency_reg',
-        'intent_assign_entropy',
-        'intent_usage_entropy',
-        'intent_confidence',
-        'intent_usage_max',
-        'intent_residual_mean',
-        'belief_uncertainty_mean',
+        'intent_reg',
         'belief_entropy_mean',
+        'belief_sigma_mean',
         'belief_confidence_mean',
-        'belief_variance_mean',
-        'belief_uncertainty_std',
-        'belief_uncertainty_early_mean',
-        'belief_uncertainty_mid_mean',
-        'belief_uncertainty_late_mean',
-        'attention_temp_mean',
-        'attention_temp_std',
-        'attention_temp_early_mean',
-        'attention_temp_mid_mean',
-        'attention_temp_late_mean',
-        'attention_temp_max',
-        'attention_temp_min',
-        'belief_mass_mean',
-        'belief_mass_max',
-        'belief_mass_min',
-        'cf_mask_mean',
-        'cf_necessity_mean',
-        'cf_potential_mean',
-        'cf_self_mean',
-        'rec_mix_mean',
-        'src_mix_mean',
-        'rec_same_delta_mean',
-        'rec_cross_delta_mean',
-        'src_same_delta_mean',
-        'src_cross_delta_mean',
-        'rec_cross_gate_mean',
-        'src_cross_gate_mean',
-        'cross_mix_effective_mean',
+        'cf_rec_effect_mean',
+        'cf_src_effect_mean',
+        'cf_rec_gate_mean',
+        'cf_src_gate_mean',
     ]
 
     @staticmethod
@@ -88,54 +36,24 @@ class UniSAR(BaseModel):
         parser.add_argument('--pred_hid_units',
                             type=List,
                             default=[200, 80, 1])
-        parser.add_argument('--intent_temp', type=float, default=0.5)
-        parser.add_argument('--cf_gate_scale', type=float, default=10.0)
-        parser.add_argument('--cf_consistency_weight',
-                            type=float,
-                            default=0.01)
-        parser.add_argument('--use_counterfactual', type=int, default=1)
-        parser.add_argument('--intent_num', type=int, default=4)
+        parser.add_argument('--intent_num', type=int, default=8)
         parser.add_argument('--intent_heads', type=int, default=2)
         parser.add_argument('--intent_dropout', type=float, default=0.1)
-        parser.add_argument('--intent_assignment_weight',
+        parser.add_argument('--intent_temp', type=float, default=0.5)
+        parser.add_argument('--intent_var_min', type=float, default=1e-4)
+        parser.add_argument('--intent_diversity_weight',
                             type=float,
                             default=0.01)
-        parser.add_argument('--intent_entropy_target',
-                            type=float,
-                            default=0.5)
-        parser.add_argument('--intent_confidence_target',
-                            type=float,
-                            default=0.55)
         parser.add_argument('--intent_diversity_margin',
                             type=float,
                             default=0.2)
-        parser.add_argument('--intent_var_min', type=float, default=1e-4)
-        parser.add_argument('--rec_cross_alpha', type=float, default=0.05)
         parser.add_argument('--belief_init_var', type=float, default=1.0)
         parser.add_argument('--belief_init_mass', type=float, default=1.0)
-        parser.add_argument('--belief_temp', type=float, default=0.5)
         parser.add_argument('--belief_prior_weight', type=float, default=1.0)
-        parser.add_argument('--attention_base_temp', type=float, default=1.0)
-        parser.add_argument('--uncertainty_temp_scale',
-                            type=float,
-                            default=0.5)
-        parser.add_argument('--attention_logit_scale',
-                            type=float,
-                            default=1.5)
-        parser.add_argument('--intent_logit_bias_scale',
-                            type=float,
-                            default=1.0)
-        parser.add_argument('--use_intent_logit_bias', type=int, default=1)
-        parser.add_argument('--attention_prob_power',
-                            type=float,
-                            default=1.5)
-        parser.add_argument('--use_uncertainty_attention', type=int, default=1)
-        parser.add_argument('--transformer_temp_min',
-                            type=float,
-                            default=0.7)
-        parser.add_argument('--transformer_temp_max',
-                            type=float,
-                            default=1.5)
+        parser.add_argument('--belief_drift_decay', type=float, default=0.98)
+        parser.add_argument('--intent_bias_scale', type=float, default=1.0)
+        parser.add_argument('--cf_temp', type=float, default=1.0)
+        parser.add_argument('--cf_bias_scale', type=float, default=1.0)
         return BaseModel.parse_model_args(parser)
 
     def __init__(self, args):
@@ -144,29 +62,17 @@ class UniSAR(BaseModel):
         self.num_heads = args.num_heads
         self.batch_size = args.batch_size
         self.intent_temp = args.intent_temp
-        self.cf_gate_scale = args.cf_gate_scale
-        self.cf_consistency_weight = args.cf_consistency_weight
-        self.use_counterfactual = bool(args.use_counterfactual)
         self.intent_num = args.intent_num
-        self.intent_assignment_weight = args.intent_assignment_weight
-        self.intent_entropy_target = args.intent_entropy_target
-        self.intent_confidence_target = args.intent_confidence_target
+        self.intent_diversity_weight = args.intent_diversity_weight
         self.intent_diversity_margin = args.intent_diversity_margin
         self.intent_var_min = args.intent_var_min
-        self.rec_cross_alpha = args.rec_cross_alpha
         self.belief_init_var = args.belief_init_var
         self.belief_init_mass = args.belief_init_mass
-        self.belief_temp = args.belief_temp
         self.belief_prior_weight = args.belief_prior_weight
-        self.attention_base_temp = args.attention_base_temp
-        self.uncertainty_temp_scale = args.uncertainty_temp_scale
-        self.attention_logit_scale = args.attention_logit_scale
-        self.intent_logit_bias_scale = args.intent_logit_bias_scale
-        self.use_intent_logit_bias = bool(args.use_intent_logit_bias)
-        self.attention_prob_power = args.attention_prob_power
-        self.use_uncertainty_attention = bool(args.use_uncertainty_attention)
-        self.transformer_temp_min = args.transformer_temp_min
-        self.transformer_temp_max = args.transformer_temp_max
+        self.belief_drift_decay = args.belief_drift_decay
+        self.intent_bias_scale = args.intent_bias_scale
+        self.cf_temp = args.cf_temp
+        self.cf_bias_scale = args.cf_bias_scale
         self.src_pos = PositionalEmbedding(const.max_src_session_his_len,
                                            self.item_size)
         self.rec_pos = PositionalEmbedding(const.max_rec_his_len,
@@ -179,35 +85,20 @@ class UniSAR(BaseModel):
                                            num_heads=self.num_heads,
                                            num_layers=self.num_layers,
                                            dropout=self.dropout,
-                                           attention_base_temp=self.attention_base_temp,
-                                           uncertainty_temp_scale=self.uncertainty_temp_scale,
-                                           attention_logit_scale=self.attention_logit_scale,
-                                           intent_logit_bias_scale=self.intent_logit_bias_scale,
-                                           attention_prob_power=self.attention_prob_power,
-                                           transformer_temp_min=self.transformer_temp_min,
-                                           transformer_temp_max=self.transformer_temp_max)
+                                           intent_bias_scale=self.intent_bias_scale,
+                                           cf_bias_scale=self.cf_bias_scale)
         self.src_transformer = Transformer(emb_size=self.item_size,
                                            num_heads=self.num_heads,
                                            num_layers=self.num_layers,
                                            dropout=self.dropout,
-                                           attention_base_temp=self.attention_base_temp,
-                                           uncertainty_temp_scale=self.uncertainty_temp_scale,
-                                           attention_logit_scale=self.attention_logit_scale,
-                                           intent_logit_bias_scale=self.intent_logit_bias_scale,
-                                           attention_prob_power=self.attention_prob_power,
-                                           transformer_temp_min=self.transformer_temp_min,
-                                           transformer_temp_max=self.transformer_temp_max)
+                                           intent_bias_scale=self.intent_bias_scale,
+                                           cf_bias_scale=self.cf_bias_scale)
         self.global_transformer = Transformer(emb_size=self.item_size,
                                               num_heads=self.num_heads,
                                               num_layers=self.num_layers,
                                               dropout=self.dropout,
-                                              attention_base_temp=self.attention_base_temp,
-                                              uncertainty_temp_scale=self.uncertainty_temp_scale,
-                                              attention_logit_scale=self.attention_logit_scale,
-                                              intent_logit_bias_scale=self.intent_logit_bias_scale,
-                                              attention_prob_power=self.attention_prob_power,
-                                              transformer_temp_min=self.transformer_temp_min,
-                                              transformer_temp_max=self.transformer_temp_max)
+                                              intent_bias_scale=self.intent_bias_scale,
+                                              cf_bias_scale=self.cf_bias_scale)
 
         self.q_i_cl_temp = args.q_i_cl_temp
         self.q_i_cl_weight = args.q_i_cl_weight
@@ -228,37 +119,28 @@ class UniSAR(BaseModel):
                                          device=self.device,
                                          infoNCE_temp=self.his_cl_temp)
 
-        if self.use_counterfactual:
-            self.original_decoder_layer = None
-            self.original_rec_cross_fusion = None
-            self.original_src_cross_fusion = None
-        else:
-            self.original_decoder_layer = nn.TransformerDecoderLayer(
-                d_model=self.item_size,
-                nhead=self.num_heads,
-                dim_feedforward=self.item_size,
-                dropout=self.dropout,
-                batch_first=True)
-            self.original_rec_cross_fusion = nn.TransformerDecoder(
-                self.original_decoder_layer, num_layers=self.num_layers)
-            self.original_src_cross_fusion = nn.TransformerDecoder(
-                self.original_decoder_layer, num_layers=self.num_layers)
+        self.rec_decoder_layer = nn.TransformerDecoderLayer(
+            d_model=self.item_size,
+            nhead=self.num_heads,
+            dim_feedforward=self.item_size,
+            dropout=self.dropout,
+            batch_first=True)
+        self.src_decoder_layer = nn.TransformerDecoderLayer(
+            d_model=self.item_size,
+            nhead=self.num_heads,
+            dim_feedforward=self.item_size,
+            dropout=self.dropout,
+            batch_first=True)
+        self.rec_cross_fusion = nn.TransformerDecoder(
+            self.rec_decoder_layer, num_layers=self.num_layers)
+        self.src_cross_fusion = nn.TransformerDecoder(
+            self.src_decoder_layer, num_layers=self.num_layers)
 
         self.intent_discovery = LatentIntentDiscovery(
             emb_dim=self.item_size,
             num_intents=self.intent_num,
             num_heads=args.intent_heads,
             dropout=args.intent_dropout)
-        if self.use_counterfactual:
-            mix_init = min(max(args.rec_cross_alpha, 1e-4), 1.0 - 1e-4)
-            mix_logit = math.log(mix_init / (1.0 - mix_init))
-            self.rec_src_mix = nn.Parameter(torch.tensor(float(mix_logit)))
-            self.src_cross_mix = nn.Parameter(torch.tensor(float(mix_logit)))
-        else:
-            self.rec_src_mix = None
-            self.src_cross_mix = None
-        self.uncertainty_norm = nn.LayerNorm(1)
-        self.uncertainty_fusion = nn.Linear(1, 1)
         self.rec_his_attn_pooling = Target_Attention(self.item_size,
                                                      self.item_size)
         self.src_his_attn_pooling = Target_Attention(self.item_size,
@@ -355,85 +237,40 @@ class UniSAR(BaseModel):
             return values.new_tensor(0.0)
         return valid_values.mean()
 
-    def safe_masked_std(self, values, mask):
-        valid_values = values.masked_select(mask)
-        if valid_values.numel() <= 1:
-            return values.new_tensor(0.0)
-        return valid_values.std(unbiased=False)
-
-    def compute_segment_means(self, values, valid_mask, prefix):
-        seq_len = values.size(1)
-        boundaries = [0, seq_len // 3, (2 * seq_len) // 3, seq_len]
-        segment_names = ['early', 'mid', 'late']
-        diagnostics = {}
-        for idx, name in enumerate(segment_names):
-            start, end = boundaries[idx], boundaries[idx + 1]
-            if end <= start:
-                diagnostics[f'{prefix}_{name}_mean'] = values.new_tensor(0.0)
-                continue
-            segment_values = values[:, start:end]
-            segment_mask = valid_mask[:, start:end]
-            diagnostics[f'{prefix}_{name}_mean'] = self.safe_masked_mean(
-                segment_values, segment_mask)
-        return diagnostics
-
-    def compute_intent_state(self, all_his_emb, all_his_mask):
-        intents = self.intent_discovery(all_his_emb, all_his_mask)
-        assign_logits = torch.matmul(all_his_emb, intents.transpose(-1, -2))
+    def compute_intent_state(self, seq_emb, seq_mask):
+        intents = self.intent_discovery(seq_emb, seq_mask)
+        assign_logits = torch.matmul(seq_emb, intents.transpose(-1, -2))
         assign_logits = assign_logits / max(self.intent_temp, 1e-6)
         prior_assign = torch.softmax(assign_logits, dim=-1)
-        prior_assign = prior_assign.masked_fill(all_his_mask.unsqueeze(-1), 0.0)
+        prior_assign = prior_assign.masked_fill(seq_mask.unsqueeze(-1), 0.0)
 
-        intent_mu = torch.matmul(prior_assign, intents)
+        intent_reg = self.compute_intent_regularization(intents)
+        diagnostics = {'intent_reg': intent_reg}
+        return intents, prior_assign, intent_reg, diagnostics
 
-        residual = (all_his_emb - intent_mu).pow(2)
-        assign_prob = prior_assign.clamp_min(1e-8)
-        entropy = -(assign_prob * assign_prob.log()).sum(dim=-1,
-                                                         keepdim=True)
-        if self.intent_num > 1:
-            entropy = entropy / math.log(self.intent_num)
-        valid_mask = ~all_his_mask
-        token_entropy = self.safe_masked_mean(entropy.squeeze(-1), valid_mask)
-        token_confidence = self.safe_masked_mean(
-            prior_assign.max(dim=-1).values, valid_mask)
-        intent_reg, proto_sim_mean, proto_sim_max, proto_sim_min, \
-            proto_margin_violation, usage_entropy = \
-            self.compute_intent_regularization(intents, prior_assign, valid_mask,
-                                               token_entropy,
-                                               token_confidence)
-        diagnostics = {
-            'intent_assignment_reg':
-            intent_reg,
-            'intent_proto_sim_mean':
-            proto_sim_mean,
-            'intent_proto_sim_max':
-            proto_sim_max,
-            'intent_proto_sim_min':
-            proto_sim_min,
-            'intent_proto_margin_violation':
-            proto_margin_violation,
-            'intent_assign_entropy':
-            token_entropy,
-            'intent_usage_entropy':
-            usage_entropy,
-            'intent_confidence':
-            token_confidence,
-            'intent_usage_max':
-            self.compute_intent_usage(prior_assign, valid_mask).max(),
-            'intent_residual_mean':
-            self.safe_masked_mean(residual.mean(dim=-1), valid_mask)
-        }
-        return intents, prior_assign, diagnostics
+    def compute_intent_regularization(self, intents):
+        if self.intent_num <= 1:
+            return intents.new_tensor(0.0)
+        norm_intents = F.normalize(intents, dim=-1)
+        proto_sim = torch.matmul(norm_intents, norm_intents.transpose(-1, -2))
+        off_diag_mask = ~torch.eye(self.intent_num,
+                                   dtype=torch.bool,
+                                   device=intents.device).unsqueeze(0)
+        off_diag_sim = proto_sim.masked_select(off_diag_mask)
+        return F.relu(off_diag_sim - self.intent_diversity_margin).mean()
 
-    def compute_belief_dynamics(self, seq_emb, intents, prior_assign, mask):
+    def compute_belief_trace(self,
+                             seq_emb,
+                             intents,
+                             prior_assign,
+                             seq_mask,
+                             update_mask=None):
         batch_size, seq_len, emb_dim = seq_emb.size()
         posterior_trace = seq_emb.new_zeros(batch_size, seq_len,
                                             self.intent_num)
-        uncertainty = seq_emb.new_zeros(batch_size, seq_len)
-        entropy_trace = seq_emb.new_zeros(batch_size, seq_len)
         confidence_trace = seq_emb.new_zeros(batch_size, seq_len)
-        var_trace = seq_emb.new_zeros(batch_size, seq_len)
-        temp_trace = seq_emb.new_zeros(batch_size, seq_len)
+        entropy_trace = seq_emb.new_zeros(batch_size, seq_len)
+        sigma_trace = seq_emb.new_zeros(batch_size, seq_len)
 
         mu = intents.clone()
         var = seq_emb.new_full((batch_size, self.intent_num, emb_dim),
@@ -441,8 +278,11 @@ class UniSAR(BaseModel):
                                    self.intent_var_min)
         mass = seq_emb.new_full((batch_size, self.intent_num),
                                 self.belief_init_mass)
-        valid = ~mask
-        belief_temp = max(self.belief_temp, 1e-6)
+        valid = ~seq_mask
+        if update_mask is None:
+            update_mask = valid
+        else:
+            update_mask = update_mask & valid
 
         for t in range(seq_len):
             valid_t = valid[:, t]
@@ -451,222 +291,119 @@ class UniSAR(BaseModel):
 
             token_state = seq_emb[:, t, :].unsqueeze(1)
             delta = token_state - mu
-            assignment_cost = (
-                delta.pow(2) / var.clamp_min(self.intent_var_min)).mean(dim=-1)
+            cost = (delta.pow(2) / var.clamp_min(self.intent_var_min)).mean(
+                dim=-1)
             log_prior = torch.log(prior_assign[:, t, :].clamp_min(1e-8))
-            scores = -assignment_cost / belief_temp + \
-                self.belief_prior_weight * log_prior
+            scores = -0.5 * cost + self.belief_prior_weight * log_prior
             posterior = torch.softmax(scores, dim=-1)
             posterior = posterior * valid_t.unsqueeze(-1).float()
             posterior = posterior / posterior.sum(dim=-1,
                                                   keepdim=True).clamp_min(1e-8)
             posterior_trace[:, t, :] = posterior
 
-            entropy_unc = -(posterior.clamp_min(1e-8) *
-                            posterior.clamp_min(1e-8).log()).sum(dim=-1)
+            entropy = -(posterior.clamp_min(1e-8) *
+                        posterior.clamp_min(1e-8).log()).sum(dim=-1)
             if self.intent_num > 1:
-                entropy_unc = entropy_unc / math.log(self.intent_num)
-            if self.use_uncertainty_attention:
-                features = entropy_unc.unsqueeze(-1)
-                fused_uncertainty = torch.sigmoid(
-                    self.uncertainty_fusion(features)).squeeze(-1)
-                attention_temp = self.attention_base_temp + \
-                    self.uncertainty_temp_scale * fused_uncertainty
-                attention_temp = attention_temp.clamp(
-                    min=self.transformer_temp_min,
-                    max=self.transformer_temp_max)
-            else:
-                fused_uncertainty = torch.zeros_like(entropy_unc)
-                attention_temp = torch.full_like(entropy_unc,
-                                                 self.attention_base_temp)
+                entropy = entropy / math.log(self.intent_num)
+            sigma = var.clamp_min(self.intent_var_min).sqrt().mean(dim=-1)
+            expected_sigma = (posterior * sigma).sum(dim=-1)
+            confidence = 1.0 / (1.0 + expected_sigma)
+            entropy_trace[:, t] = entropy * valid_t.float()
+            sigma_trace[:, t] = expected_sigma * valid_t.float()
+            confidence_trace[:, t] = confidence * valid_t.float()
 
-            uncertainty[:, t] = fused_uncertainty * valid_t.float()
-            entropy_trace[:, t] = entropy_unc * valid_t.float()
-            confidence_trace[:, t] = posterior.max(dim=-1).values * \
-                valid_t.float()
-            var_trace[:, t] = (posterior * var.mean(dim=-1)).sum(dim=-1) * \
-                valid_t.float()
-            temp_trace[:, t] = attention_temp * valid_t.float()
+            can_update_t = update_mask[:, t]
+            update_weight = posterior * can_update_t.unsqueeze(-1).float()
+            if not can_update_t.any():
+                continue
 
-            posterior_update = posterior.unsqueeze(-1)
-            token_state_sq = token_state.pow(2)
-            prev_mass = mass
-            prev_mu = mu
-            prev_var = var
-            mass = mass + posterior
-            mass_safe = mass.unsqueeze(-1).clamp_min(1e-8)
-            weighted_token = posterior_update * token_state
-            weighted_token_sq = posterior_update * token_state_sq
-            mu = (prev_mass.unsqueeze(-1) * prev_mu +
-                  weighted_token) / mass_safe
-            second_old = prev_var + prev_mu.pow(2)
-            second = (prev_mass.unsqueeze(-1) * second_old +
-                      weighted_token_sq) / mass_safe
-            var = (second - mu.pow(2)).clamp_min(self.intent_var_min)
+            old_mass = mass
+            old_mu = mu
+            old_var = var
+            effective_old_mass = self.belief_drift_decay * old_mass
+            new_mass = effective_old_mass + update_weight
+            new_mass_safe = new_mass.unsqueeze(-1).clamp_min(1e-8)
+            update_weight_expanded = update_weight.unsqueeze(-1)
+            new_mu = (effective_old_mass.unsqueeze(-1) * old_mu +
+                      update_weight_expanded * token_state) / new_mass_safe
+            old_second = old_var + old_mu.pow(2)
+            new_second = (effective_old_mass.unsqueeze(-1) * old_second +
+                          update_weight_expanded *
+                          token_state.pow(2)) / new_mass_safe
+            new_var = (new_second - new_mu.pow(2)).clamp_min(
+                self.intent_var_min)
+
+            row_mask = can_update_t.view(batch_size, 1, 1)
+            mu = torch.where(row_mask, new_mu, old_mu)
+            var = torch.where(row_mask, new_var, old_var)
+            mass = torch.where(can_update_t.unsqueeze(-1), new_mass, old_mass)
 
         diagnostics = {
-            'belief_uncertainty_mean':
-            self.safe_masked_mean(uncertainty, valid),
-            'belief_uncertainty_std':
-            self.safe_masked_std(uncertainty, valid),
             'belief_entropy_mean':
             self.safe_masked_mean(entropy_trace, valid),
+            'belief_sigma_mean':
+            self.safe_masked_mean(sigma_trace, valid),
             'belief_confidence_mean':
             self.safe_masked_mean(confidence_trace, valid),
-            'belief_variance_mean':
-            self.safe_masked_mean(var_trace, valid),
-            'attention_temp_mean':
-            self.safe_masked_mean(temp_trace, valid),
-            'attention_temp_std':
-            self.safe_masked_std(temp_trace, valid),
-            'attention_temp_max':
-            temp_trace.masked_select(valid).max()
-            if valid.any() else seq_emb.new_tensor(self.attention_base_temp),
-            'attention_temp_min':
-            temp_trace.masked_select(valid).min()
-            if valid.any() else seq_emb.new_tensor(self.attention_base_temp),
-            'belief_mass_mean':
-            mass.mean(),
-            'belief_mass_max':
-            mass.max(),
-            'belief_mass_min':
-            mass.min()
         }
-        diagnostics.update(
-            self.compute_segment_means(uncertainty, valid,
-                                       'belief_uncertainty'))
-        diagnostics.update(
-            self.compute_segment_means(temp_trace, valid, 'attention_temp'))
-        posterior_trace = posterior_trace.masked_fill(mask.unsqueeze(-1), 0.0)
-        return posterior_trace, uncertainty.masked_fill(mask, 0.0), diagnostics
+        return posterior_trace.masked_fill(seq_mask.unsqueeze(-1), 0.0), \
+            confidence_trace.masked_fill(seq_mask, 0.0), mu, var, mass, \
+            diagnostics
 
-    def compute_intent_usage(self, assign, valid_mask):
-        valid_count = valid_mask.float().sum()
-        if valid_count <= 0:
-            return assign.new_full((self.intent_num, ), 1.0 / self.intent_num)
-        token_weights = valid_mask.float().unsqueeze(-1)
-        usage = (assign * token_weights).sum(dim=(0, 1))
-        usage = usage / valid_count.clamp_min(1.0)
-        return usage / usage.sum().clamp_min(1e-8)
+    def compute_source_counterfactual(self, full_posterior, no_rec_posterior,
+                                      no_src_posterior, seq_mask):
+        valid = ~seq_mask
+        full = full_posterior.clamp_min(1e-8)
+        no_rec = no_rec_posterior.clamp_min(1e-8)
+        no_src = no_src_posterior.clamp_min(1e-8)
+        rec_effect = (full * (full.log() - no_rec.log())).sum(dim=-1)
+        src_effect = (full * (full.log() - no_src.log())).sum(dim=-1)
+        rec_effect = rec_effect.masked_fill(seq_mask, 0.0)
+        src_effect = src_effect.masked_fill(seq_mask, 0.0)
 
-    def compute_intent_regularization(self, intents, assign, valid_mask,
-                                      token_entropy, token_confidence):
-        zero = intents.new_tensor(0.0)
-        if self.intent_num <= 1:
-            return zero, zero, zero, zero, zero, zero
-        norm_intents = F.normalize(intents, dim=-1)
-        proto_sim = torch.matmul(norm_intents,
-                                 norm_intents.transpose(-1, -2))
-        off_diag_mask = ~torch.eye(self.intent_num,
-                                   dtype=torch.bool,
-                                   device=intents.device).unsqueeze(0)
-        off_diag_sim = proto_sim.masked_select(off_diag_mask)
-        proto_sim_mean = off_diag_sim.mean()
-        proto_sim_max = off_diag_sim.max()
-        proto_sim_min = off_diag_sim.min()
-        proto_violation = F.relu(proto_sim - self.intent_diversity_margin)
-        proto_loss = proto_violation.masked_select(off_diag_mask).mean()
-        proto_margin_violation = proto_violation.masked_select(
-            off_diag_mask).mean()
-
-        valid_count = valid_mask.float().sum()
-        if valid_count <= 0:
-            return proto_loss, proto_sim_mean, proto_sim_max, proto_sim_min, \
-                proto_margin_violation, zero
-        usage = self.compute_intent_usage(assign, valid_mask)
-        usage_entropy = -(usage.clamp_min(1e-8) *
-                          usage.clamp_min(1e-8).log()).sum()
-        if self.intent_num > 1:
-            usage_entropy = usage_entropy / math.log(self.intent_num)
-        usage_loss = 1.0 - usage_entropy
-        entropy_target = float(min(max(self.intent_entropy_target, 0.0), 1.0))
-        confidence_target = float(
-            min(max(self.intent_confidence_target, 0.0), 1.0))
-        assignment_loss = F.relu(token_entropy - entropy_target) + \
-            F.relu(confidence_target - token_confidence)
-        return assignment_loss + proto_loss + usage_loss, proto_sim_mean, \
-            proto_sim_max, proto_sim_min, proto_margin_violation, \
-            usage_entropy
-
-    def aggregate_belief_diagnostics(self, diagnostics):
-        aggregate = {}
-        for key in self.BELIEF_MEAN_KEYS:
-            aggregate[key] = sum(d[key] for d in diagnostics) / len(diagnostics)
-        for key in self.BELIEF_MAX_KEYS:
-            aggregate[key] = torch.stack([d[key] for d in diagnostics]).max()
-        for key in self.BELIEF_MIN_KEYS:
-            aggregate[key] = torch.stack([d[key] for d in diagnostics]).min()
-        return aggregate
-
-    def build_regularization(self, intent_diagnostics, belief_diagnostics,
-                             device):
-        zero = torch.tensor(0.0, device=device)
-        regularization = {
-            'intent_assignment_reg':
-            intent_diagnostics['intent_assignment_reg'],
-            'intent_proto_sim_mean':
-            intent_diagnostics['intent_proto_sim_mean'],
-            'intent_proto_sim_max':
-            intent_diagnostics['intent_proto_sim_max'],
-            'intent_proto_sim_min':
-            intent_diagnostics['intent_proto_sim_min'],
-            'intent_proto_margin_violation':
-            intent_diagnostics['intent_proto_margin_violation'],
-            'intent_assign_entropy':
-            intent_diagnostics['intent_assign_entropy'],
-            'intent_usage_entropy':
-            intent_diagnostics['intent_usage_entropy'],
-            'intent_confidence':
-            intent_diagnostics['intent_confidence'],
-            'intent_usage_max':
-            intent_diagnostics['intent_usage_max'],
-            'intent_residual_mean':
-            intent_diagnostics['intent_residual_mean'],
-            'cf_consistency_reg':
-            zero
+        cf_logits = torch.stack([rec_effect, src_effect], dim=-1)
+        cf_source_gate = torch.softmax(cf_logits / max(self.cf_temp, 1e-6),
+                                       dim=-1)
+        cf_source_gate = cf_source_gate.masked_fill(seq_mask.unsqueeze(-1),
+                                                    0.0)
+        diagnostics = {
+            'cf_rec_effect_mean':
+            self.safe_masked_mean(rec_effect, valid),
+            'cf_src_effect_mean':
+            self.safe_masked_mean(src_effect, valid),
+            'cf_rec_gate_mean':
+            self.safe_masked_mean(cf_source_gate[..., 0], valid),
+            'cf_src_gate_mean':
+            self.safe_masked_mean(cf_source_gate[..., 1], valid),
         }
-        regularization.update(self.aggregate_belief_diagnostics(
-            belief_diagnostics))
+        return cf_source_gate, rec_effect, src_effect, diagnostics
+
+    def split_rec_src_scalar(self, values, all_his_type):
+        rec_values = torch.masked_select(values, all_his_type == 1).reshape(
+            values.shape[0], const.max_rec_his_len)
+        src_values = torch.masked_select(values, all_his_type == 2).reshape(
+            values.shape[0], const.max_src_session_his_len)
+        return rec_values, src_values
+
+    def build_regularization(self, intent_reg, belief_diagnostics,
+                             cf_diagnostics):
+        regularization = {'intent_reg': intent_reg}
         for key in [
-                'cf_mask_mean', 'cf_necessity_mean', 'cf_potential_mean',
-                'cf_self_mean', 'rec_mix_mean', 'src_mix_mean',
-                'rec_same_delta_mean', 'rec_cross_delta_mean',
-                'src_same_delta_mean', 'src_cross_delta_mean',
-                'rec_cross_gate_mean', 'src_cross_gate_mean',
-                'cross_mix_effective_mean'
+                'belief_entropy_mean', 'belief_sigma_mean',
+                'belief_confidence_mean'
         ]:
-            regularization[key] = zero
+            regularization[key] = belief_diagnostics[key]
+        regularization.update(cf_diagnostics)
         return regularization
 
-    def compute_counterfactual_gates(self, full_pred, wo_cross_pred,
-                                     wo_same_pred):
-        cross_delta = F.relu(full_pred - wo_cross_pred).squeeze(-1)
-        same_delta = F.relu(full_pred - wo_same_pred).squeeze(-1)
-        gate_logits = self.cf_gate_scale * torch.stack([same_delta, cross_delta],
-                                                       dim=-1)
-        gate_probs = torch.softmax(gate_logits, dim=-1)
-        return gate_probs[:, 0], gate_probs[:, 1]
-
-    def compute_cross_supplement_gates(self, full_pred, wo_cross_pred,
-                                       wo_same_pred):
-        cross_delta = F.relu(full_pred - wo_cross_pred).squeeze(-1)
-        same_delta = F.relu(full_pred - wo_same_pred).squeeze(-1)
-        gate_logits = self.cf_gate_scale * torch.stack([same_delta, cross_delta],
-                                                       dim=-1)
-        gate_probs = torch.softmax(gate_logits, dim=-1)
-        cross_gate = gate_probs[:, 1]
-        same_gate = torch.ones_like(cross_gate)
-        return same_gate, cross_gate
-
-    def apply_original_cross_fusion(self, rec2rec, src2rec, rec_his_mask,
-                                    src2src, rec2src, src_his_mask, user_emb,
-                                    items_emb):
-        rec_fusion_decoded = self.original_rec_cross_fusion(
+    def apply_cross_fusion(self, rec2rec, src2rec, rec_his_mask, src2src,
+                           rec2src, src_his_mask, user_emb, items_emb):
+        rec_fusion_decoded = self.rec_cross_fusion(
             tgt=rec2rec,
             memory=src2rec,
             tgt_key_padding_mask=rec_his_mask,
             memory_key_padding_mask=rec_his_mask)
-        src_fusion_decoded = self.original_src_cross_fusion(
+        src_fusion_decoded = self.src_cross_fusion(
             tgt=src2src,
             memory=rec2src,
             tgt_key_padding_mask=src_his_mask,
@@ -711,47 +448,51 @@ class UniSAR(BaseModel):
                                                (all_his_emb.shape[0],
                                                 const.max_src_session_his_len))
 
-        all_intents, all_assign, intent_diagnostics = self.compute_intent_state(
-            all_his_emb, all_his_mask)
+        all_intents, all_prior_assign, intent_reg, _ = \
+            self.compute_intent_state(all_his_emb, all_his_mask)
+
+        valid = ~all_his_mask
+        rec_update = valid & (all_his_type == 1)
+        src_update = valid & (all_his_type == 2)
+        full_update = valid
+        no_rec_update = src_update
+        no_src_update = rec_update
+
+        full_posterior, full_confidence, _, _, _, belief_diagnostics = \
+            self.compute_belief_trace(all_his_emb, all_intents,
+                                      all_prior_assign, all_his_mask,
+                                      full_update)
+        no_rec_posterior, _, _, _, _, _ = self.compute_belief_trace(
+            all_his_emb, all_intents, all_prior_assign, all_his_mask,
+            no_rec_update)
+        no_src_posterior, _, _, _, _, _ = self.compute_belief_trace(
+            all_his_emb, all_intents, all_prior_assign, all_his_mask,
+            no_src_update)
+        cf_source_gate, _, _, cf_diagnostics = \
+            self.compute_source_counterfactual(full_posterior,
+                                               no_rec_posterior,
+                                               no_src_posterior,
+                                               all_his_mask)
+
         rec_his_emb, src_his_emb = self.split_rec_src(all_his_emb,
                                                       all_his_type)
-        rec_intents, rec_prior_assign, _ = \
-            self.compute_intent_state(rec_his_emb, rec_his_mask)
-        src_intents, src_prior_assign, _ = \
-            self.compute_intent_state(src_his_emb, src_his_mask)
-        global_posterior, global_uncertainty, global_belief_diagnostics = \
-            self.compute_belief_dynamics(all_his_emb, all_intents, all_assign,
-                                         all_his_mask)
-        rec_posterior, rec_uncertainty, rec_belief_diagnostics = \
-            self.compute_belief_dynamics(rec_his_emb, rec_intents,
-                                         rec_prior_assign, rec_his_mask)
-        src_posterior, src_uncertainty, src_belief_diagnostics = \
-            self.compute_belief_dynamics(src_his_emb, src_intents,
-                                         src_prior_assign, src_his_mask)
+        rec_posterior, src_posterior = self.split_rec_src(
+            full_posterior, all_his_type)
+        rec_confidence, src_confidence = self.split_rec_src_scalar(
+            full_confidence, all_his_type)
 
         all_his_emb_w_pos = all_his_emb + self.global_pos_emb(all_his_emb)
 
         global_mask = all_his_type[:, :, None] == all_his_type[:, None, :]
 
-        global_attention_uncertainty = global_uncertainty \
-            if self.use_uncertainty_attention else None
-        rec_attention_uncertainty = rec_uncertainty \
-            if self.use_uncertainty_attention else None
-        src_attention_uncertainty = src_uncertainty \
-            if self.use_uncertainty_attention else None
-        global_attention_intent = global_posterior \
-            if self.use_intent_logit_bias else None
-        rec_attention_intent = rec_posterior \
-            if self.use_intent_logit_bias else None
-        src_attention_intent = src_posterior \
-            if self.use_intent_logit_bias else None
-
         global_encoded = self.global_transformer(
             all_his_emb_w_pos,
             all_his_mask,
             global_mask,
-            uncertainty=global_attention_uncertainty,
-            intent_assign=global_attention_intent)
+            intent_assign=full_posterior,
+            belief_confidence=full_confidence,
+            source_gate=cf_source_gate,
+            token_type=all_his_type)
         cross_valid = (~global_mask) & (~all_his_mask).unsqueeze(1)
         has_cross_source = cross_valid.any(dim=-1)
         global_encoded = global_encoded.masked_fill(
@@ -763,169 +504,23 @@ class UniSAR(BaseModel):
 
         rec2rec = self.rec_transformer(rec_his_emb_w_pos,
                                        rec_his_mask,
-                                       uncertainty=rec_attention_uncertainty,
-                                       intent_assign=rec_attention_intent)
+                                       intent_assign=rec_posterior,
+                                       belief_confidence=rec_confidence)
         src2src = self.src_transformer(src_his_emb_w_pos,
                                        src_his_mask,
-                                       uncertainty=src_attention_uncertainty,
-                                       intent_assign=src_attention_intent)
+                                       intent_assign=src_posterior,
+                                       belief_confidence=src_confidence)
 
         his_cl_used = [
             src2rec, rec2rec, rec_his_mask, rec2src, src2src, src_his_mask
         ]
 
-        regularization = self.build_regularization(
-            intent_diagnostics, [
-                global_belief_diagnostics, rec_belief_diagnostics,
-                src_belief_diagnostics
-            ], all_his.device)
-
-        if not self.use_counterfactual:
-            regularization['cf_mask_mean'] = regularization[
-                'cf_mask_mean'].new_tensor(0.5)
-            user_feats = self.apply_original_cross_fusion(
-                rec2rec, src2rec, rec_his_mask, src2src, rec2src,
-                src_his_mask, user_emb, items_emb)
-            return user_feats, q_i_align_used, his_cl_used, regularization
-
-        feature_list = [
-            rec2rec, src2rec, rec_his_mask, src2src, rec2src, src_his_mask,
-            user_emb
-        ]
-        if domain == 'src':
-            assert query_emb is not None
-            feature_list.append(query_emb)
-        repeat_feature_list, flat_items_emb = self.repeat_feat(
-            feature_list, items_emb)
-
-        if domain == 'rec':
-            rec2rec, src2rec, rec_his_mask, src2src, rec2src, src_his_mask, \
-                user_emb = repeat_feature_list
-        else:
-            rec2rec, src2rec, rec_his_mask, src2src, rec2src, src_his_mask, \
-                user_emb, repeated_query_emb = repeat_feature_list
-
-        rec_full_seq = torch.cat([rec2rec, src2rec], dim=1)
-        rec_full_mask = torch.cat([rec_his_mask, src_his_mask], dim=1)
-        src_full_seq = torch.cat([src2src, rec2src], dim=1)
-        src_full_mask = torch.cat([src_his_mask, rec_his_mask], dim=1)
-
-        rec_same_only = self.rec_his_attn_pooling(rec2rec, flat_items_emb,
-                                                  rec_his_mask)
-        rec_cross_only = self.rec_his_attn_pooling(src2rec, flat_items_emb,
-                                                   src_his_mask)
-        rec_full = self.rec_his_attn_pooling(rec_full_seq, flat_items_emb,
-                                             rec_full_mask)
-        src_same_only = self.src_his_attn_pooling(src2src, flat_items_emb,
-                                                  src_his_mask)
-        src_cross_only = self.src_his_attn_pooling(rec2src, flat_items_emb,
-                                                   rec_his_mask)
-        src_full = self.src_his_attn_pooling(src_full_seq, flat_items_emb,
-                                             src_full_mask)
-
-        if domain == 'rec':
-            rec_full_pred = self.inter_pred([rec_full, src_full, user_emb],
-                                            flat_items_emb,
-                                            domain='rec')
-            rec_wo_cross_pred = self.inter_pred(
-                [rec_same_only, src_full, user_emb],
-                flat_items_emb,
-                domain='rec')
-            rec_wo_same_pred = self.inter_pred(
-                [rec_cross_only, src_full, user_emb],
-                flat_items_emb,
-                domain='rec')
-
-            src_full_pred = self.inter_pred([rec_full, src_full, user_emb],
-                                            flat_items_emb,
-                                            domain='rec')
-            src_wo_cross_pred = self.inter_pred(
-                [rec_full, src_same_only, user_emb],
-                flat_items_emb,
-                domain='rec')
-            src_wo_same_pred = self.inter_pred(
-                [rec_full, src_cross_only, user_emb],
-                flat_items_emb,
-                domain='rec')
-        else:
-            rec_full_pred = self.inter_pred([rec_full, src_full, user_emb],
-                                            flat_items_emb,
-                                            domain='src',
-                                            query_emb=repeated_query_emb)
-            rec_wo_cross_pred = self.inter_pred(
-                [rec_same_only, src_full, user_emb],
-                flat_items_emb,
-                domain='src',
-                query_emb=repeated_query_emb)
-            rec_wo_same_pred = self.inter_pred(
-                [rec_cross_only, src_full, user_emb],
-                flat_items_emb,
-                domain='src',
-                query_emb=repeated_query_emb)
-
-            src_full_pred = self.inter_pred([rec_full, src_full, user_emb],
-                                            flat_items_emb,
-                                            domain='src',
-                                            query_emb=repeated_query_emb)
-            src_wo_cross_pred = self.inter_pred(
-                [rec_full, src_same_only, user_emb],
-                flat_items_emb,
-                domain='src',
-                query_emb=repeated_query_emb)
-            src_wo_same_pred = self.inter_pred(
-                [rec_full, src_cross_only, user_emb],
-                flat_items_emb,
-                domain='src',
-                query_emb=repeated_query_emb)
-
-        rec_same_gate, rec_cross_gate = self.compute_cross_supplement_gates(
-            rec_full_pred, rec_wo_cross_pred, rec_wo_same_pred)
-        src_same_gate, src_cross_gate = self.compute_counterfactual_gates(
-            src_full_pred, src_wo_cross_pred, src_wo_same_pred)
-        rec_same_delta = F.relu(rec_full_pred - rec_wo_same_pred).squeeze(-1)
-        rec_cross_delta = F.relu(rec_full_pred - rec_wo_cross_pred).squeeze(-1)
-        src_same_delta = F.relu(src_full_pred - src_wo_same_pred).squeeze(-1)
-        src_cross_delta = F.relu(src_full_pred - src_wo_cross_pred).squeeze(-1)
-        rec_consistency = 0.5 * (
-            F.relu(rec_wo_cross_pred - rec_full_pred).mean() +
-            F.relu(rec_wo_same_pred - rec_full_pred).mean())
-        src_consistency = 0.5 * (
-            F.relu(src_wo_cross_pred - src_full_pred).mean() +
-            F.relu(src_wo_same_pred - src_full_pred).mean())
-
-        regularization['cf_mask_mean'] = 0.5 * (
-            rec_cross_gate.mean() + src_cross_gate.mean())
-        regularization['cf_necessity_mean'] = rec_cross_gate.mean()
-        regularization['cf_potential_mean'] = src_cross_gate.mean()
-        regularization['cf_self_mean'] = 0.5 * (
-            rec_same_gate.mean() + src_same_gate.mean())
-        regularization['rec_same_delta_mean'] = rec_same_delta.mean()
-        regularization['rec_cross_delta_mean'] = rec_cross_delta.mean()
-        regularization['src_same_delta_mean'] = src_same_delta.mean()
-        regularization['src_cross_delta_mean'] = src_cross_delta.mean()
-        regularization['rec_cross_gate_mean'] = rec_cross_gate.mean()
-        regularization['src_cross_gate_mean'] = src_cross_gate.mean()
-        regularization['cf_consistency_reg'] = 0.5 * (rec_consistency +
-                                                      src_consistency)
-
-        rec_mix = torch.sigmoid(self.rec_src_mix)
-        src_mix = torch.sigmoid(self.src_cross_mix)
-        rec_cross_candidate = rec_same_only + rec_cross_gate.unsqueeze(
-            -1) * (rec_cross_only - rec_same_only)
-        src_cross_candidate = src_same_only + src_cross_gate.unsqueeze(
-            -1) * (src_cross_only - src_same_only)
-        rec_fusion = (1.0 - rec_mix) * rec_same_only + rec_mix * \
-            rec_cross_candidate
-        src_fusion = (1.0 - src_mix) * src_same_only + src_mix * \
-            src_cross_candidate
-        regularization['rec_mix_mean'] = rec_mix
-        regularization['src_mix_mean'] = src_mix
-        regularization['cross_mix_effective_mean'] = 0.5 * (
-            (rec_mix * rec_cross_gate).mean() +
-            (src_mix * src_cross_gate).mean())
-
-        user_feats = [rec_fusion, src_fusion, user_emb]
-
+        regularization = self.build_regularization(intent_reg,
+                                                   belief_diagnostics,
+                                                   cf_diagnostics)
+        user_feats = self.apply_cross_fusion(rec2rec, src2rec, rec_his_mask,
+                                             src2src, rec2src, src_his_mask,
+                                             user_emb, items_emb)
         return user_feats, q_i_align_used, his_cl_used, regularization
 
     def inter_pred(self, user_feats, item_emb, domain, query_emb=None):
@@ -987,11 +582,8 @@ class UniSAR(BaseModel):
         for key in self.DIAGNOSTIC_KEYS:
             loss_dict[key] = regularization[key].clone()
 
-        total_loss += self.intent_assignment_weight * regularization[
-            'intent_assignment_reg']
-        if self.use_counterfactual:
-            total_loss += self.cf_consistency_weight * regularization[
-                'cf_consistency_reg']
+        total_loss += self.intent_diversity_weight * regularization[
+            'intent_reg']
         loss_dict['total_loss'] = total_loss
         return loss_dict
 
@@ -1222,24 +814,17 @@ class TransAlign(nn.Module):
         return info_nce_loss
 
 
-class IntentAwareSelfAttention(nn.Module):
-    def __init__(self, emb_size, num_heads, dropout, attention_base_temp,
-                 uncertainty_temp_scale, attention_logit_scale,
-                 intent_logit_bias_scale, attention_prob_power,
-                 transformer_temp_min, transformer_temp_max) -> None:
+class IntentSourceSelfAttention(nn.Module):
+    def __init__(self, emb_size, num_heads, dropout, intent_bias_scale,
+                 cf_bias_scale) -> None:
         super().__init__()
         if emb_size % num_heads != 0:
             num_heads = 1
         self.emb_size = emb_size
         self.num_heads = num_heads
         self.head_dim = emb_size // num_heads
-        self.attention_base_temp = attention_base_temp
-        self.uncertainty_temp_scale = uncertainty_temp_scale
-        self.attention_logit_scale = attention_logit_scale
-        self.intent_logit_bias_scale = intent_logit_bias_scale
-        self.attention_prob_power = attention_prob_power
-        self.transformer_temp_min = transformer_temp_min
-        self.transformer_temp_max = transformer_temp_max
+        self.intent_bias_scale = intent_bias_scale
+        self.cf_bias_scale = cf_bias_scale
 
         self.q_proj = nn.Linear(emb_size, emb_size)
         self.k_proj = nn.Linear(emb_size, emb_size)
@@ -1251,8 +836,10 @@ class IntentAwareSelfAttention(nn.Module):
                 his_emb,
                 src_key_padding_mask,
                 src_mask=None,
-                uncertainty=None,
-                intent_assign=None):
+                intent_assign=None,
+                belief_confidence=None,
+                source_gate=None,
+                token_type=None):
         batch_size, seq_len, _ = his_emb.size()
         query = self.q_proj(his_emb).reshape(
             batch_size, seq_len, self.num_heads,
@@ -1266,37 +853,44 @@ class IntentAwareSelfAttention(nn.Module):
         attn_logits = torch.matmul(query,
                                    key.transpose(-1, -2)) / math.sqrt(
                                        self.head_dim)
-        attn_logits = attn_logits * self.attention_logit_scale
 
-        if intent_assign is not None and self.intent_logit_bias_scale != 0:
+        if intent_assign is not None and self.intent_bias_scale != 0:
             intent_sim = torch.matmul(intent_assign,
                                       intent_assign.transpose(-1, -2))
             intent_center = 1.0 / max(intent_assign.size(-1), 1)
-            intent_bias = (intent_sim - intent_center) * \
-                self.intent_logit_bias_scale
+            intent_bias = intent_sim - intent_center
+            if belief_confidence is not None:
+                pair_confidence = torch.sqrt(
+                    belief_confidence.unsqueeze(-1).clamp_min(0.0) *
+                    belief_confidence.unsqueeze(1).clamp_min(0.0))
+                intent_bias = intent_bias * pair_confidence
+            intent_bias = intent_bias * self.intent_bias_scale
             attn_logits = attn_logits + intent_bias.unsqueeze(1)
+
+        if source_gate is not None and token_type is not None and \
+                belief_confidence is not None and self.cf_bias_scale != 0:
+            rec_support = source_gate[..., 0].unsqueeze(-1)
+            src_support = source_gate[..., 1].unsqueeze(-1)
+            key_is_rec = (token_type == 1).unsqueeze(1)
+            key_is_src = (token_type == 2).unsqueeze(1)
+            source_bias = torch.zeros(batch_size,
+                                      seq_len,
+                                      seq_len,
+                                      device=his_emb.device,
+                                      dtype=his_emb.dtype)
+            source_bias = source_bias + rec_support * key_is_rec.float()
+            source_bias = source_bias + src_support * key_is_src.float()
+            source_bias = (source_bias - 0.5) * belief_confidence.unsqueeze(-1)
+            attn_logits = attn_logits + self.cf_bias_scale * \
+                source_bias.unsqueeze(1)
 
         attn_mask = src_key_padding_mask.unsqueeze(1).unsqueeze(2)
         if src_mask is not None:
             attn_mask = attn_mask | src_mask.unsqueeze(1)
         attn_logits = attn_logits.masked_fill(attn_mask, -1e16)
 
-        if uncertainty is not None:
-            temperature = self.attention_base_temp + \
-                self.uncertainty_temp_scale * uncertainty
-            temperature = temperature.clamp(
-                min=self.transformer_temp_min,
-                max=self.transformer_temp_max)
-            temperature = temperature.masked_fill(src_key_padding_mask,
-                                                  self.attention_base_temp)
-            attn_logits = attn_logits / temperature.unsqueeze(1).unsqueeze(-1)
-
         attn_probs = torch.softmax(attn_logits, dim=-1)
         attn_probs = attn_probs.masked_fill(attn_mask, 0.0)
-        attn_probs = attn_probs.clamp_min(1e-12).pow(self.attention_prob_power)
-        attn_probs = attn_probs.masked_fill(attn_mask, 0.0)
-        attn_probs = attn_probs / attn_probs.sum(dim=-1,
-                                                 keepdim=True).clamp_min(1e-8)
         attn_probs = self.dropout(attn_probs)
         output = torch.matmul(attn_probs, value)
         output = output.transpose(1, 2).reshape(batch_size, seq_len,
@@ -1305,23 +899,16 @@ class IntentAwareSelfAttention(nn.Module):
         return output.masked_fill(src_key_padding_mask.unsqueeze(-1), 0.0)
 
 
-class IntentAwareTransformerLayer(nn.Module):
-    def __init__(self, emb_size, num_heads, dropout, attention_base_temp,
-                 uncertainty_temp_scale, attention_logit_scale,
-                 intent_logit_bias_scale, attention_prob_power, transformer_temp_min,
-                 transformer_temp_max) -> None:
+class IntentSourceTransformerLayer(nn.Module):
+    def __init__(self, emb_size, num_heads, dropout, intent_bias_scale,
+                 cf_bias_scale) -> None:
         super().__init__()
-        self.self_attn = IntentAwareSelfAttention(
+        self.self_attn = IntentSourceSelfAttention(
             emb_size=emb_size,
             num_heads=num_heads,
             dropout=dropout,
-            attention_base_temp=attention_base_temp,
-            uncertainty_temp_scale=uncertainty_temp_scale,
-            attention_logit_scale=attention_logit_scale,
-            intent_logit_bias_scale=intent_logit_bias_scale,
-            attention_prob_power=attention_prob_power,
-            transformer_temp_min=transformer_temp_min,
-            transformer_temp_max=transformer_temp_max)
+            intent_bias_scale=intent_bias_scale,
+            cf_bias_scale=cf_bias_scale)
         self.linear1 = nn.Linear(emb_size, emb_size)
         self.linear2 = nn.Linear(emb_size, emb_size)
         self.norm1 = nn.LayerNorm(emb_size)
@@ -1333,10 +920,13 @@ class IntentAwareTransformerLayer(nn.Module):
                 his_emb,
                 src_key_padding_mask,
                 src_mask=None,
-                uncertainty=None,
-                intent_assign=None):
+                intent_assign=None,
+                belief_confidence=None,
+                source_gate=None,
+                token_type=None):
         attn_output = self.self_attn(his_emb, src_key_padding_mask, src_mask,
-                                     uncertainty, intent_assign)
+                                     intent_assign, belief_confidence,
+                                     source_gate, token_type)
         his_emb = self.norm1(his_emb + self.dropout(attn_output))
         ffn_output = self.linear2(self.dropout(self.activation(
             self.linear1(his_emb))))
@@ -1346,23 +936,15 @@ class IntentAwareTransformerLayer(nn.Module):
 
 class Transformer(nn.Module):
     def __init__(self, emb_size, num_heads, num_layers, dropout,
-                 attention_base_temp, uncertainty_temp_scale,
-                 attention_logit_scale, intent_logit_bias_scale,
-                 attention_prob_power,
-                 transformer_temp_min, transformer_temp_max) -> None:
+                 intent_bias_scale, cf_bias_scale) -> None:
         super().__init__()
         self.layers = nn.ModuleList([
-            IntentAwareTransformerLayer(
+            IntentSourceTransformerLayer(
                 emb_size=emb_size,
                 num_heads=num_heads,
                 dropout=dropout,
-                attention_base_temp=attention_base_temp,
-                uncertainty_temp_scale=uncertainty_temp_scale,
-                attention_logit_scale=attention_logit_scale,
-                intent_logit_bias_scale=intent_logit_bias_scale,
-                attention_prob_power=attention_prob_power,
-                transformer_temp_min=transformer_temp_min,
-                transformer_temp_max=transformer_temp_max)
+                intent_bias_scale=intent_bias_scale,
+                cf_bias_scale=cf_bias_scale)
             for _ in range(num_layers)
         ])
 
@@ -1370,10 +952,13 @@ class Transformer(nn.Module):
                 his_emb: torch.Tensor,
                 src_key_padding_mask: torch.Tensor,
                 src_mask: torch.Tensor = None,
-                uncertainty: torch.Tensor = None,
-                intent_assign: torch.Tensor = None):
+                intent_assign: torch.Tensor = None,
+                belief_confidence: torch.Tensor = None,
+                source_gate: torch.Tensor = None,
+                token_type: torch.Tensor = None):
         his_encoded = his_emb
         for layer in self.layers:
             his_encoded = layer(his_encoded, src_key_padding_mask, src_mask,
-                                uncertainty, intent_assign)
+                                intent_assign, belief_confidence, source_gate,
+                                token_type)
         return his_encoded

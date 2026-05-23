@@ -466,34 +466,14 @@ class SarRunner(BaseRunner):
                         ])))
         logging.info("total time: {:.2f}s".format(time.time() - start))
         diagnostic_groups = {
-            'intent': [
-                'intent_assign_entropy', 'intent_confidence',
-                'intent_usage_entropy', 'intent_usage_max',
-                'intent_residual_mean', 'intent_proto_sim_mean',
-                'intent_proto_sim_max', 'intent_proto_sim_min',
-                'intent_proto_margin_violation', 'intent_assignment_reg'
-            ],
+            'intent': ['intent_reg'],
             'belief': [
-                'belief_entropy_mean', 'belief_uncertainty_mean',
-                'belief_uncertainty_early_mean',
-                'belief_uncertainty_mid_mean',
-                'belief_uncertainty_late_mean',
-                'belief_uncertainty_std',
-                'belief_confidence_mean', 'belief_variance_mean',
-                'attention_temp_mean', 'attention_temp_early_mean',
-                'attention_temp_mid_mean', 'attention_temp_late_mean',
-                'attention_temp_std', 'attention_temp_min',
-                'attention_temp_max', 'belief_mass_mean', 'belief_mass_min',
-                'belief_mass_max'
+                'belief_entropy_mean', 'belief_sigma_mean',
+                'belief_confidence_mean'
             ],
             'cf': [
-                'cf_mask_mean', 'cf_necessity_mean', 'cf_potential_mean',
-                'cf_self_mean', 'cf_consistency_reg',
-                'rec_mix_mean', 'src_mix_mean',
-                'rec_same_delta_mean', 'rec_cross_delta_mean',
-                'src_same_delta_mean', 'src_cross_delta_mean',
-                'rec_cross_gate_mean', 'src_cross_gate_mean',
-                'cross_mix_effective_mean'
+                'cf_rec_effect_mean', 'cf_src_effect_mean',
+                'cf_rec_gate_mean', 'cf_src_gate_mean'
             ]
         }
 
@@ -516,43 +496,10 @@ class SarRunner(BaseRunner):
 
         def build_flags(domain_loss):
             flags = []
-            cf_mask_mean = np.mean(domain_loss.get('cf_mask_mean',
-                                                   [0.5])).item()
-            intent_usage_max = np.mean(domain_loss.get('intent_usage_max',
-                                                       [0.0])).item()
-            intent_entropy = np.mean(domain_loss.get('intent_assign_entropy',
-                                                     [1.0])).item()
-            intent_proto_sim_max = np.mean(
-                domain_loss.get('intent_proto_sim_max', [0.0])).item()
-            intent_proto_margin_violation = np.mean(
-                domain_loss.get('intent_proto_margin_violation',
-                                [0.0])).item()
-            belief_uncertainty = np.mean(
-                domain_loss.get('belief_uncertainty_mean', [0.0])).item()
             belief_confidence = np.mean(
                 domain_loss.get('belief_confidence_mean', [0.0])).item()
-            attention_temp_mean = np.mean(
-                domain_loss.get('attention_temp_mean', [1.0])).item()
-            if intent_usage_max > 0.70:
-                flags.append('intent_usage_collapse')
-            if intent_entropy > 0.85:
-                flags.append('intent_assignment_high_entropy')
-            if intent_entropy < 0.20:
-                flags.append('intent_assignment_low_entropy')
-            if intent_proto_sim_max > 0.80:
-                flags.append('intent_proto_too_similar')
-            if intent_proto_margin_violation > 0.10:
-                flags.append('intent_proto_margin_violation')
-            if belief_uncertainty > 0.80:
-                flags.append('belief_high_uncertainty')
             if belief_confidence < 0.25:
                 flags.append('belief_low_confidence')
-            if attention_temp_mean > 1.40:
-                flags.append('attention_temp_high')
-            if cf_mask_mean < getattr(model, 'cf_mask_floor', 0.05):
-                flags.append('cf_mask_too_small')
-            if cf_mask_mean > getattr(model, 'cf_mask_ceiling', 0.95):
-                flags.append('cf_mask_too_large')
             return ",".join(flags) if flags else 'ok'
 
         rec_flags = build_flags(loss_dict['rec'])
