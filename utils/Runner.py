@@ -195,7 +195,19 @@ class BaseRunner(object):
     def evaluate_method(predictions: np.ndarray, topk: int,
                         metrics: List[str]) -> Dict[str, float]:
         evaluations = dict()
-        sort_idx = (-predictions).argsort(axis=1)
+        # Ground-truth item is at column 0. If a row has ties (e.g., all scores
+        # equal early in training), a stable argsort will always rank column 0
+        # first and produce fake-perfect metrics. Break ties with tiny jitter.
+        if predictions.size == 0:
+            return {f'{m}@{k}': 0.0 for k in topk for m in metrics}
+        # Replace NaN/inf so ranking is meaningful and metrics aren't fake-perfect.
+        predictions = np.nan_to_num(predictions,
+                                    nan=-1e30,
+                                    posinf=1e30,
+                                    neginf=-1e30)
+        rng = np.random.RandomState(0)
+        jitter = rng.uniform(low=-1e-12, high=1e-12, size=predictions.shape)
+        sort_idx = (-(predictions + jitter)).argsort(axis=1)
         gt_rank = np.argwhere(sort_idx == 0)[:, 1] + 1
         for k in topk:
             hit = (gt_rank <= k)
@@ -445,8 +457,22 @@ class SarRunner(BaseRunner):
             total_loss = rec_loss['total_loss'] + \
                 src_loss['total_loss'] * self.src_loss_weight
 
+            if not torch.isfinite(total_loss):
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
+
             self.optimizer.zero_grad()
             total_loss.backward()
+
+            has_bad_grad = False
+            for p in model.parameters():
+                if p.grad is not None and not torch.isfinite(p.grad).all():
+                    has_bad_grad = True
+                    break
+            if has_bad_grad:
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
+
             self.optimizer.step()
             loss_list.append(total_loss.item())
 

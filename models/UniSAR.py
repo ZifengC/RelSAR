@@ -432,12 +432,25 @@ class UniSAR(BaseModel):
                 items,
                 items_emb,
                 domain,
-                query_emb=None):
+                query_emb=None,
+                drop_empty_history=False):
         assert domain in ['rec', 'src']
         user_emb = self.session_embedding.get_user_emb(user)
 
         all_his_emb, all_his_mask, q_i_align_used = self.get_all_his_emb(
             all_his, all_his_type)
+        valid_row_mask = (all_his_emb.abs().sum(dim=(1, 2)) > 0)
+        if drop_empty_history and not valid_row_mask.all():
+            keep_idx = valid_row_mask
+            user_emb = user_emb[keep_idx]
+            all_his_emb = all_his_emb[keep_idx]
+            all_his_mask = all_his_mask[keep_idx]
+            all_his_type = all_his_type[keep_idx]
+            items_emb = items_emb[keep_idx]
+            q_i_align_used = [t[keep_idx] for t in q_i_align_used]
+            if query_emb is not None:
+                query_emb = query_emb[keep_idx]
+            valid_row_mask = valid_row_mask[keep_idx]
 
         rec_his_mask = torch.masked_select(all_his_mask,
                                            (all_his_type == 1)).reshape(
@@ -521,7 +534,8 @@ class UniSAR(BaseModel):
         user_feats = self.apply_cross_fusion(rec2rec, src2rec, rec_his_mask,
                                              src2src, rec2src, src_his_mask,
                                              user_emb, items_emb)
-        return user_feats, q_i_align_used, his_cl_used, regularization
+        return user_feats, q_i_align_used, his_cl_used, regularization, \
+            valid_row_mask
 
     def inter_pred(self, user_feats, item_emb, domain, query_emb=None):
         assert domain in ["rec", "src"]
@@ -563,8 +577,11 @@ class UniSAR(BaseModel):
             align_loss = self.feature_alignment(
                 [align_neg_items_emb, align_neg_querys_emb], query_emb,
                 click_item_mask, q_click_item_emb)
-            loss_dict['q_i_cl_loss'] = align_loss.clone()
-            total_loss += self.q_i_cl_weight * align_loss
+            if torch.isfinite(align_loss):
+                loss_dict['q_i_cl_loss'] = align_loss.clone()
+                total_loss += self.q_i_cl_weight * align_loss
+            else:
+                loss_dict['q_i_cl_loss'] = total_loss.new_tensor(0.0)
 
         if self.his_cl_weight > 0:
             src2rec, rec2rec, rec_his_mask,\
@@ -573,8 +590,11 @@ class UniSAR(BaseModel):
             src_his_cl_loss = self.src_his_cl(rec2src, src2src, src_his_mask)
 
             his_cl_loss = rec_his_cl_loss + src_his_cl_loss
-            loss_dict['his_cl_loss'] = his_cl_loss.clone()
-            total_loss += self.his_cl_weight * his_cl_loss
+            if torch.isfinite(his_cl_loss):
+                loss_dict['his_cl_loss'] = his_cl_loss.clone()
+                total_loss += self.his_cl_weight * his_cl_loss
+            else:
+                loss_dict['his_cl_loss'] = total_loss.new_tensor(0.0)
 
         return total_loss
 
@@ -596,11 +616,28 @@ class UniSAR(BaseModel):
         items_emb = self.session_embedding.get_item_emb(items)
         batch_size = items_emb.size(0)
 
-        user_feats, q_i_align_used, his_cl_used, regularization = self.forward(
-            user, all_his, all_his_type, items, items_emb, domain='rec')
+        user_feats, q_i_align_used, his_cl_used, regularization, \
+            valid_row_mask = self.forward(
+                user,
+                all_his,
+                all_his_type,
+                items,
+                items_emb,
+                domain='rec',
+                drop_empty_history=True)
+
+        if valid_row_mask.numel() == 0:
+            zero = items_emb.new_tensor(0.0)
+            loss_dict = {'click_loss': zero}
+            for key in self.DIAGNOSTIC_KEYS:
+                loss_dict[key] = zero
+            loss_dict['total_loss'] = zero
+            return loss_dict
 
         logits = self.inter_pred(user_feats, items_emb, domain="rec").reshape(
-            (batch_size, -1))
+            (valid_row_mask.size(0), -1))
+        logits = torch.nan_to_num(logits, nan=0.5, posinf=1.0, neginf=0.0)
+        logits = logits.clamp(0.0, 1.0)
         labels = torch.zeros_like(logits, dtype=torch.float32)
         labels[:, 0] = 1.0
 
@@ -623,7 +660,7 @@ class UniSAR(BaseModel):
         items_emb = self.session_embedding.get_item_emb(items)
         batch_size = items_emb.size(0)
 
-        user_feats, _, _, _ = self.forward(
+        user_feats, _, _, _, _ = self.forward(
             user, all_his, all_his_type, items, items_emb, domain='rec')
 
         logits = self.inter_pred(user_feats, items_emb, domain="rec").reshape(
@@ -642,19 +679,32 @@ class UniSAR(BaseModel):
         items_emb = self.session_embedding.get_item_emb(items)
         batch_size = items_emb.size(0)
 
-        user_feats, q_i_align_used, his_cl_used, regularization = self.forward(
-            user,
-            all_his,
-            all_his_type,
-            items,
-            items_emb,
-            domain='src',
-            query_emb=query_emb)
+        user_feats, q_i_align_used, his_cl_used, regularization, \
+            valid_row_mask = self.forward(
+                user,
+                all_his,
+                all_his_type,
+                items,
+                items_emb,
+                domain='src',
+                query_emb=query_emb,
+                drop_empty_history=True)
+
+        if valid_row_mask.numel() == 0:
+            zero = items_emb.new_tensor(0.0)
+            loss_dict = {'click_loss': zero}
+            for key in self.DIAGNOSTIC_KEYS:
+                loss_dict[key] = zero
+            loss_dict['total_loss'] = zero
+            return loss_dict
 
         logits = self.inter_pred(user_feats,
                                  items_emb,
                                  domain="src",
-                                 query_emb=query_emb).reshape((batch_size, -1))
+                                 query_emb=query_emb).reshape(
+                                     (valid_row_mask.size(0), -1))
+        logits = torch.nan_to_num(logits, nan=0.5, posinf=1.0, neginf=0.0)
+        logits = logits.clamp(0.0, 1.0)
         labels = torch.zeros_like(logits, dtype=torch.float32)
         labels[:, 0] = 1.0
 
@@ -680,7 +730,7 @@ class UniSAR(BaseModel):
         items_emb = self.session_embedding.get_item_emb(items)
         batch_size = items_emb.size(0)
 
-        user_feats, _, _, _ = self.forward(
+        user_feats, _, _, _, _ = self.forward(
             user,
             all_his,
             all_his_type,
@@ -887,7 +937,9 @@ class IntentSourceSelfAttention(nn.Module):
         attn_mask = src_key_padding_mask.unsqueeze(1).unsqueeze(2)
         if src_mask is not None:
             attn_mask = attn_mask | src_mask.unsqueeze(1)
+        fully_masked_rows = attn_mask.all(dim=-1, keepdim=True)
         attn_logits = attn_logits.masked_fill(attn_mask, -1e16)
+        attn_logits = attn_logits.masked_fill(fully_masked_rows, 0.0)
 
         attn_probs = torch.softmax(attn_logits, dim=-1)
         attn_probs = attn_probs.masked_fill(attn_mask, 0.0)
