@@ -31,7 +31,9 @@ belief_init_mass: 1.0
 belief_prior_weight: 1.0
 belief_drift_decay: 0.98
 intent_bias_scale: 1.0
-cf_temp: 1.0
-cf_bias_scale: 1.0
+use_counterfactual: 1
+cf_gate_scale: 10.0
+cf_consistency_weight: 0.01
+rec_cross_alpha: 0.05
 
 src_loss_weight: 0.01 # weight for the loss of search

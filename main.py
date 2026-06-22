@@ -68,11 +68,13 @@ if __name__ == '__main__':
                 args.belief_prior_weight, args.belief_drift_decay,
                 args.intent_var_min))
     logging.info(
-        "Key Params |attention intent_bias_scale:{} cf_bias_scale:{} cf_temp:{}|"
-        .format(args.intent_bias_scale, args.cf_bias_scale, args.cf_temp))
+        "Key Params |attention intent_bias_scale:{}|".format(
+            args.intent_bias_scale))
     logging.info(
-        "Key Params |counterfactual source-removal src_loss_weight:{}|".
-        format(args.src_loss_weight))
+        "Key Params |prediction counterfactual use:{} gate_scale:{} consistency_weight:{} rec_cross_alpha:{} src_loss_weight:{}|"
+        .format(args.use_counterfactual, args.cf_gate_scale,
+                args.cf_consistency_weight, args.rec_cross_alpha,
+                args.src_loss_weight))
 
     model: BaseModel = UniSAR(args)
     runner: BaseRunner = SarRunner(args)
