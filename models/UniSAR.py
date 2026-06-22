@@ -905,6 +905,18 @@ class UniSAR(BaseModel):
         regularization['src_cross_delta_mean'] = src_cross_delta.mean()
         regularization['rec_cross_gate_mean'] = rec_cross_gate.mean()
         regularization['src_cross_gate_mean'] = src_cross_gate.mean()
+        regularization['rec_cross_gate_pos'] = rec_cross_gate.reshape(
+            items_emb.size(0), -1)[:, 0]
+        regularization['src_cross_gate_pos'] = src_cross_gate.reshape(
+            items_emb.size(0), -1)[:, 0]
+        regularization['rec_same_delta_pos'] = rec_same_delta.reshape(
+            items_emb.size(0), -1)[:, 0]
+        regularization['rec_cross_delta_pos'] = rec_cross_delta.reshape(
+            items_emb.size(0), -1)[:, 0]
+        regularization['src_same_delta_pos'] = src_same_delta.reshape(
+            items_emb.size(0), -1)[:, 0]
+        regularization['src_cross_delta_pos'] = src_cross_delta.reshape(
+            items_emb.size(0), -1)[:, 0]
         regularization['cf_consistency_reg'] = 0.5 * (rec_consistency +
                                                       src_consistency)
 

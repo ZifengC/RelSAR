@@ -33,7 +33,7 @@ def build_args() -> argparse.Namespace:
         '--split',
         type=str,
         default='test',
-        choices=['train', 'val', 'test'],
+        choices=['train', 'val', 'test', 'all'],
         help='Dataset split to export.'
     )
     parser.add_argument(
@@ -41,6 +41,13 @@ def build_args() -> argparse.Namespace:
         type=str,
         default='intermediate/pcsar_intent_posteriors.csv',
         help='CSV file to write.'
+    )
+    parser.add_argument(
+        '--export_profile',
+        type=str,
+        default='full',
+        choices=['full', 'mechanism'],
+        help='Column profile to export. mechanism keeps state, attribution, and ranking summaries only.'
     )
     parser.add_argument(
         '--export_trajectory',
@@ -60,6 +67,12 @@ def build_args() -> argparse.Namespace:
         type=str,
         default='',
         help='Path to best.pt. Falls back to --test_path when empty.'
+    )
+    parser.add_argument(
+        '--progress_interval',
+        type=int,
+        default=50,
+        help='Print export progress every N batches. Set 0 to disable.'
     )
     return parser.parse_args()
 
@@ -89,6 +102,16 @@ def get_split_loaders(runner: SarRunner, split: str):
     if split == 'test':
         return runner.rec_test_loader, runner.src_test_loader, runner.testdata['rec'], runner.testdata['src']
     raise ValueError(f'Unsupported split: {split}')
+
+
+def iter_split_loaders(runner: SarRunner, split: str):
+    if split == 'all':
+        for split_name in ('train', 'val', 'test'):
+            rec_loader, src_loader, rec_data, src_data = get_split_loaders(runner, split_name)
+            yield split_name, rec_loader, src_loader, rec_data, src_data
+    else:
+        rec_loader, src_loader, rec_data, src_data = get_split_loaders(runner, split)
+        yield split, rec_loader, src_loader, rec_data, src_data
 
 
 def compute_entropy(pi: np.ndarray) -> float:
@@ -128,6 +151,17 @@ def to_scalar(value) -> float:
     if isinstance(value, torch.Tensor):
         return float(value.detach().cpu().mean().item())
     return float(np.asarray(value).mean())
+
+
+def to_batch_array(value, batch_size: int) -> np.ndarray:
+    if value is None:
+        return np.full(batch_size, np.nan, dtype=np.float64)
+    arr = tensor_to_numpy(value).reshape(-1)
+    if arr.size == batch_size:
+        return arr.astype(np.float64)
+    if arr.size == 1:
+        return np.full(batch_size, float(arr[0]), dtype=np.float64)
+    raise ValueError(f'Expected scalar or batch-sized diagnostic, got shape {arr.shape}')
 
 
 def extract_loss_diagnostics(loss_dict: dict) -> dict:
@@ -241,11 +275,16 @@ def export_channel(
     raw_df: pd.DataFrame,
     channel: str,
     split: str,
+    export_profile: str,
+    progress_interval: int,
 ) -> list[dict]:
     rows = []
     offset = 0
+    export_full = export_profile == 'full'
+    total_batches = len(loader) if hasattr(loader, '__len__') else None
+    total_rows = len(raw_df)
 
-    for batch in loader:
+    for batch_idx, batch in enumerate(loader, start=1):
         batch = utils.batch_to_gpu(batch, model.device)
 
         pos_item = batch['item']
@@ -311,12 +350,13 @@ def export_channel(
         global_uncertainty = global_uncertainty.detach().cpu().numpy()
         rec_uncertainty = rec_uncertainty.detach().cpu().numpy()
         src_uncertainty = src_uncertainty.detach().cpu().numpy()
-        global_history_mean = masked_mean_embeddings(all_his_emb, all_his_mask).detach().cpu().numpy()
-        rec_history_mean = masked_mean_embeddings(rec_his_emb, rec_his_mask).detach().cpu().numpy()
-        src_history_mean = masked_mean_embeddings(src_his_emb, src_his_mask).detach().cpu().numpy()
-        pos_item_emb = items_emb[:, 0, :].detach().cpu().numpy()
-        query_emb_np = tensor_to_numpy(query_emb) if query_emb is not None else None
-        user_feats, _, _, _ = model.forward(
+        if export_full:
+            global_history_mean = masked_mean_embeddings(all_his_emb, all_his_mask).detach().cpu().numpy()
+            rec_history_mean = masked_mean_embeddings(rec_his_emb, rec_his_mask).detach().cpu().numpy()
+            src_history_mean = masked_mean_embeddings(src_his_emb, src_his_mask).detach().cpu().numpy()
+            pos_item_emb = items_emb[:, 0, :].detach().cpu().numpy()
+            query_emb_np = tensor_to_numpy(query_emb) if query_emb is not None else None
+        user_feats, _, _, batch_regularization = model.forward(
             batch['user'],
             batch['all_his'],
             batch['all_his_type'],
@@ -325,37 +365,38 @@ def export_channel(
             domain='rec' if channel == 'R' else 'src',
             query_emb=query_emb,
         )
-        user_feats_np = [tensor_to_numpy(feat) for feat in user_feats]
-        _, _, _, batch_regularization = model.forward(
-            batch['user'],
-            batch['all_his'],
-            batch['all_his_type'],
-            items,
-            items_emb,
-            domain='rec' if channel == 'R' else 'src',
-            query_emb=query_emb,
-        )
-        batch_regularization = {
-            key: to_scalar(value) if isinstance(value, torch.Tensor) else float(value)
-            for key, value in batch_regularization.items()
-        }
+        if export_full:
+            user_feats_np = [tensor_to_numpy(feat) for feat in user_feats]
         rec_logits = tensor_to_numpy(model.rec_predict(batch))
         src_logits = tensor_to_numpy(model.src_predict(batch)) if 'query' in batch else None
-        rec_topk_idx = np.argsort(-rec_logits, axis=1)[:, :min(TOPK_EXPORT, rec_logits.shape[1])]
-        rec_items_np = items.detach().cpu().numpy()
-        rec_topk_item_ids = np.take_along_axis(rec_items_np, rec_topk_idx, axis=1)
-        rec_topk_scores = np.take_along_axis(rec_logits, rec_topk_idx, axis=1)
-        rec_topk_item_emb = np.take_along_axis(
-            items_emb.detach().cpu().numpy(),
-            rec_topk_idx[:, :, None],
-            axis=1,
-        )
-        rec_topk_mean_emb = rec_topk_item_emb.mean(axis=1)
+        if export_full:
+            rec_topk_idx = np.argsort(-rec_logits, axis=1)[:, :min(TOPK_EXPORT, rec_logits.shape[1])]
+            rec_items_np = items.detach().cpu().numpy()
+            rec_topk_item_ids = np.take_along_axis(rec_items_np, rec_topk_idx, axis=1)
+            rec_topk_scores = np.take_along_axis(rec_logits, rec_topk_idx, axis=1)
+            rec_topk_item_emb = np.take_along_axis(
+                items_emb.detach().cpu().numpy(),
+                rec_topk_idx[:, :, None],
+                axis=1,
+            )
+            rec_topk_mean_emb = rec_topk_item_emb.mean(axis=1)
         hist_len = (~hist_mask).sum(dim=1).detach().cpu().numpy().astype(int)
         global_hist_len = (~all_his_mask).sum(dim=1).detach().cpu().numpy().astype(int)
         rec_hist_len = (~rec_his_mask).sum(dim=1).detach().cpu().numpy().astype(int)
         src_hist_len = (~src_his_mask).sum(dim=1).detach().cpu().numpy().astype(int)
         batch_size = int(batch['batch_size'])
+        scalar_regularization = extract_loss_diagnostics(batch_regularization)
+        sample_regularization = {
+            key: to_batch_array(batch_regularization.get(key), batch_size)
+            for key in (
+                'rec_cross_gate_pos',
+                'src_cross_gate_pos',
+                'rec_same_delta_pos',
+                'rec_cross_delta_pos',
+                'src_same_delta_pos',
+                'src_cross_delta_pos',
+            )
+        }
         rec_pred_summary = summarize_logits(rec_logits, items.detach().cpu().numpy())
         src_pred_summary = summarize_logits(src_logits, items.detach().cpu().numpy()) if src_logits is not None else None
 
@@ -398,42 +439,48 @@ def export_channel(
                 'global_dominant_intent_prob': global_metrics['dominant_intent_prob'],
                 'global_intent_entropy': global_metrics['intent_entropy'],
                 'global_posterior_uncertainty': float(global_uncertainty[i, global_state_idx]),
-                'global_belief_uncertainty_mean': batch_regularization.get('belief_uncertainty_mean', float('nan')),
-                'global_belief_confidence_mean': batch_regularization.get('belief_confidence_mean', float('nan')),
-                'global_attention_temp_mean': batch_regularization.get('attention_temp_mean', float('nan')),
-                'global_belief_entropy_mean': batch_regularization.get('belief_entropy_mean', float('nan')),
+                'global_belief_uncertainty_mean': scalar_regularization.get('belief_uncertainty_mean', float('nan')),
+                'global_belief_confidence_mean': scalar_regularization.get('belief_confidence_mean', float('nan')),
+                'global_attention_temp_mean': scalar_regularization.get('attention_temp_mean', float('nan')),
+                'global_belief_entropy_mean': scalar_regularization.get('belief_entropy_mean', float('nan')),
                 'rec_dominant_intent': rec_metrics['dominant_intent'],
                 'rec_dominant_intent_prob': rec_metrics['dominant_intent_prob'],
                 'rec_intent_entropy': rec_metrics['intent_entropy'],
                 'rec_posterior_uncertainty': float(rec_uncertainty[i, rec_state_idx]),
-                'rec_belief_uncertainty_mean': batch_regularization.get('belief_uncertainty_mean', float('nan')),
-                'rec_belief_confidence_mean': batch_regularization.get('belief_confidence_mean', float('nan')),
-                'rec_attention_temp_mean': batch_regularization.get('attention_temp_mean', float('nan')),
-                'rec_belief_entropy_mean': batch_regularization.get('belief_entropy_mean', float('nan')),
+                'rec_belief_uncertainty_mean': scalar_regularization.get('belief_uncertainty_mean', float('nan')),
+                'rec_belief_confidence_mean': scalar_regularization.get('belief_confidence_mean', float('nan')),
+                'rec_attention_temp_mean': scalar_regularization.get('attention_temp_mean', float('nan')),
+                'rec_belief_entropy_mean': scalar_regularization.get('belief_entropy_mean', float('nan')),
                 'src_dominant_intent': src_metrics['dominant_intent'],
                 'src_dominant_intent_prob': src_metrics['dominant_intent_prob'],
                 'src_intent_entropy': src_metrics['intent_entropy'],
                 'src_posterior_uncertainty': float(src_uncertainty[i, src_state_idx]),
-                'src_belief_uncertainty_mean': batch_regularization.get('belief_uncertainty_mean', float('nan')),
-                'src_belief_confidence_mean': batch_regularization.get('belief_confidence_mean', float('nan')),
-                'src_attention_temp_mean': batch_regularization.get('attention_temp_mean', float('nan')),
-                'src_belief_entropy_mean': batch_regularization.get('belief_entropy_mean', float('nan')),
+                'src_belief_uncertainty_mean': scalar_regularization.get('belief_uncertainty_mean', float('nan')),
+                'src_belief_confidence_mean': scalar_regularization.get('belief_confidence_mean', float('nan')),
+                'src_attention_temp_mean': scalar_regularization.get('attention_temp_mean', float('nan')),
+                'src_belief_entropy_mean': scalar_regularization.get('belief_entropy_mean', float('nan')),
                 'attribution_source_proxy': 'R' if rec_metrics['dominant_intent_prob'] >= src_metrics['dominant_intent_prob'] else 'S',
                 'attribution_confidence_gap': float(rec_metrics['dominant_intent_prob'] - src_metrics['dominant_intent_prob']),
                 'attribution_entropy_gap': float(src_metrics['intent_entropy'] - rec_metrics['intent_entropy']),
                 'rec_src_intent_shift_dot': float(1.0 - np.dot(pi_rec, pi_src)),
                 'rec_src_intent_shift_js': compute_js_distance(pi_rec, pi_src),
-                'batch_intent_assign_entropy': batch_regularization.get('intent_assign_entropy', float('nan')),
-                'batch_intent_confidence': batch_regularization.get('intent_confidence', float('nan')),
-                'batch_intent_usage_entropy': batch_regularization.get('intent_usage_entropy', float('nan')),
-                'batch_belief_uncertainty_mean': batch_regularization.get('belief_uncertainty_mean', float('nan')),
-                'batch_belief_confidence_mean': batch_regularization.get('belief_confidence_mean', float('nan')),
-                'batch_belief_entropy_mean': batch_regularization.get('belief_entropy_mean', float('nan')),
-                'batch_attention_temp_mean': batch_regularization.get('attention_temp_mean', float('nan')),
-                'batch_cf_mask_mean': batch_regularization.get('cf_mask_mean', float('nan')),
-                'batch_cf_necessity_mean': batch_regularization.get('cf_necessity_mean', float('nan')),
-                'batch_cf_potential_mean': batch_regularization.get('cf_potential_mean', float('nan')),
-                'batch_cf_self_mean': batch_regularization.get('cf_self_mean', float('nan')),
+                'batch_intent_assign_entropy': scalar_regularization.get('intent_assign_entropy', float('nan')),
+                'batch_intent_confidence': scalar_regularization.get('intent_confidence', float('nan')),
+                'batch_intent_usage_entropy': scalar_regularization.get('intent_usage_entropy', float('nan')),
+                'batch_belief_uncertainty_mean': scalar_regularization.get('belief_uncertainty_mean', float('nan')),
+                'batch_belief_confidence_mean': scalar_regularization.get('belief_confidence_mean', float('nan')),
+                'batch_belief_entropy_mean': scalar_regularization.get('belief_entropy_mean', float('nan')),
+                'batch_attention_temp_mean': scalar_regularization.get('attention_temp_mean', float('nan')),
+                'batch_cf_mask_mean': scalar_regularization.get('cf_mask_mean', float('nan')),
+                'batch_cf_necessity_mean': scalar_regularization.get('cf_necessity_mean', float('nan')),
+                'batch_cf_potential_mean': scalar_regularization.get('cf_potential_mean', float('nan')),
+                'batch_cf_self_mean': scalar_regularization.get('cf_self_mean', float('nan')),
+                'rec_cross_gate_pos': float(sample_regularization['rec_cross_gate_pos'][i]),
+                'src_cross_gate_pos': float(sample_regularization['src_cross_gate_pos'][i]),
+                'rec_same_delta_pos': float(sample_regularization['rec_same_delta_pos'][i]),
+                'rec_cross_delta_pos': float(sample_regularization['rec_cross_delta_pos'][i]),
+                'src_same_delta_pos': float(sample_regularization['src_same_delta_pos'][i]),
+                'src_cross_delta_pos': float(sample_regularization['src_cross_delta_pos'][i]),
             }
 
             row['candidate_count'] = int(rec_logits.shape[1])
@@ -455,26 +502,27 @@ def export_channel(
                 row['src_pred_top1_is_pos'] = int(src_pred_summary['top1_is_pos'][i])
                 row['src_pred_top1_item_id'] = int(src_pred_summary['top1_item_id'][i]) if 'top1_item_id' in src_pred_summary else int(items.detach().cpu().numpy()[i, int(src_pred_summary['top1_index'][i])])
 
-            add_vector_fields(row, 'global_history_mean_emb', global_history_mean[i])
-            add_vector_fields(row, 'rec_history_mean_emb', rec_history_mean[i])
-            add_vector_fields(row, 'src_history_mean_emb', src_history_mean[i])
-            add_vector_fields(row, 'pos_item_emb', pos_item_emb[i])
             add_vector_fields(row, 'global_prior_assign', prior_pi)
             add_vector_fields(row, 'rec_prior_assign', prior_pi_rec)
             add_vector_fields(row, 'src_prior_assign', prior_pi_src)
-            add_vector_fields(row, 'rec_user_feat', user_feats_np[0][i])
-            add_vector_fields(row, 'src_user_feat', user_feats_np[1][i])
-            add_vector_fields(row, 'shared_user_feat', user_feats_np[2][i])
-            add_vector_fields(row, 'rec_logits', rec_logits[i])
-            row['rec_topk_count'] = int(rec_topk_idx.shape[1])
-            for k in range(rec_topk_idx.shape[1]):
-                row[f'rec_topk_item_id_{k}'] = int(rec_topk_item_ids[i, k])
-                row[f'rec_topk_score_{k}'] = float(rec_topk_scores[i, k])
-            add_vector_fields(row, 'rec_topk_mean_emb', rec_topk_mean_emb[i])
-            if src_logits is not None:
-                add_vector_fields(row, 'src_logits', src_logits[i])
-            if query_emb_np is not None:
-                add_vector_fields(row, 'query_emb', query_emb_np[i])
+            if export_full:
+                add_vector_fields(row, 'global_history_mean_emb', global_history_mean[i])
+                add_vector_fields(row, 'rec_history_mean_emb', rec_history_mean[i])
+                add_vector_fields(row, 'src_history_mean_emb', src_history_mean[i])
+                add_vector_fields(row, 'pos_item_emb', pos_item_emb[i])
+                add_vector_fields(row, 'rec_user_feat', user_feats_np[0][i])
+                add_vector_fields(row, 'src_user_feat', user_feats_np[1][i])
+                add_vector_fields(row, 'shared_user_feat', user_feats_np[2][i])
+                add_vector_fields(row, 'rec_logits', rec_logits[i])
+                row['rec_topk_count'] = int(rec_topk_idx.shape[1])
+                for k in range(rec_topk_idx.shape[1]):
+                    row[f'rec_topk_item_id_{k}'] = int(rec_topk_item_ids[i, k])
+                    row[f'rec_topk_score_{k}'] = float(rec_topk_scores[i, k])
+                add_vector_fields(row, 'rec_topk_mean_emb', rec_topk_mean_emb[i])
+                if src_logits is not None:
+                    add_vector_fields(row, 'src_logits', src_logits[i])
+                if query_emb_np is not None:
+                    add_vector_fields(row, 'query_emb', query_emb_np[i])
 
             for key in ('timestamp', 'item_id', 'keyword', 'search_session_id'):
                 if key in raw_df.columns:
@@ -495,6 +543,17 @@ def export_channel(
             rows.append(row)
 
         offset += batch_size
+        if progress_interval > 0 and (
+            batch_idx == 1
+            or batch_idx % progress_interval == 0
+            or (total_batches is not None and batch_idx == total_batches)
+        ):
+            batch_total = total_batches if total_batches is not None else '?'
+            print(
+                f'[{split} {channel}] batch {batch_idx}/{batch_total}, '
+                f'rows {min(offset, total_rows)}/{total_rows}',
+                flush=True,
+            )
 
     return rows
 
@@ -583,15 +642,40 @@ def main() -> None:
     model.eval()
 
     runner = SarRunner(args)
-    rec_loader, src_loader, rec_data, src_data = get_split_loaders(runner, args.split)
 
     records = []
-    records.extend(export_channel(model, rec_loader, rec_data.sampler.data.reset_index(drop=True), 'R', args.split))
-    records.extend(export_channel(model, src_loader, src_data.sampler.data.reset_index(drop=True), 'S', args.split))
+    for split_name, rec_loader, src_loader, rec_data, src_data in iter_split_loaders(runner, args.split):
+        records.extend(export_channel(
+            model,
+            rec_loader,
+            rec_data.sampler.data.reset_index(drop=True),
+            'R',
+            split_name,
+            args.export_profile,
+            args.progress_interval,
+        ))
+        records.extend(export_channel(
+            model,
+            src_loader,
+            src_data.sampler.data.reset_index(drop=True),
+            'S',
+            split_name,
+            args.export_profile,
+            args.progress_interval,
+        ))
 
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     df = pd.DataFrame(records)
+    if not df.empty:
+        df['_channel_order'] = df['channel'].map({'R': 0, 'S': 1}).fillna(99).astype(int)
+        sort_cols = ['user_id']
+        if 'timestamp' in df.columns:
+            sort_cols.append('timestamp')
+        sort_cols.extend(['_channel_order', 'split', 'sample_index'])
+        df = df.sort_values(sort_cols, kind='mergesort').reset_index(drop=True)
+        df.insert(0, 'export_sample_index', np.arange(len(df), dtype=int))
+        df = df.drop(columns=['_channel_order'])
     df.to_csv(out_path, index=False)
     print(f'saved: {out_path}')
     print(df.head())
