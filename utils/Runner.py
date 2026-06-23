@@ -474,16 +474,16 @@ class SarRunner(BaseRunner):
                 'intent_proto_margin_violation', 'intent_assignment_reg'
             ],
             'belief': [
-                'belief_entropy_mean', 'belief_uncertainty_mean',
-                'belief_uncertainty_early_mean',
-                'belief_uncertainty_mid_mean',
-                'belief_uncertainty_late_mean',
-                'belief_uncertainty_std',
+                'belief_entropy_mean', 'state_uncertainty_mean',
+                'state_uncertainty_early_mean',
+                'state_uncertainty_mid_mean',
+                'state_uncertainty_late_mean',
+                'state_uncertainty_std',
                 'belief_confidence_mean', 'belief_variance_mean',
-                'attention_temp_mean', 'attention_temp_early_mean',
-                'attention_temp_mid_mean', 'attention_temp_late_mean',
-                'attention_temp_std', 'attention_temp_min',
-                'attention_temp_max', 'belief_mass_mean', 'belief_mass_min',
+                'state_temp_mean', 'state_temp_early_mean',
+                'state_temp_mid_mean', 'state_temp_late_mean',
+                'state_temp_std', 'state_temp_min',
+                'state_temp_max', 'belief_mass_mean', 'belief_mass_min',
                 'belief_mass_max'
             ],
             'cf': [
@@ -527,12 +527,12 @@ class SarRunner(BaseRunner):
             intent_proto_margin_violation = np.mean(
                 domain_loss.get('intent_proto_margin_violation',
                                 [0.0])).item()
-            belief_uncertainty = np.mean(
-                domain_loss.get('belief_uncertainty_mean', [0.0])).item()
+            state_uncertainty = np.mean(
+                domain_loss.get('state_uncertainty_mean', [0.0])).item()
             belief_confidence = np.mean(
                 domain_loss.get('belief_confidence_mean', [0.0])).item()
-            attention_temp_mean = np.mean(
-                domain_loss.get('attention_temp_mean', [1.0])).item()
+            state_temp_mean = np.mean(
+                domain_loss.get('state_temp_mean', [1.0])).item()
             if intent_usage_max > 0.70:
                 flags.append('intent_usage_collapse')
             if intent_entropy > 0.85:
@@ -543,12 +543,12 @@ class SarRunner(BaseRunner):
                 flags.append('intent_proto_too_similar')
             if intent_proto_margin_violation > 0.10:
                 flags.append('intent_proto_margin_violation')
-            if belief_uncertainty > 0.80:
-                flags.append('belief_high_uncertainty')
+            if state_uncertainty > 0.80:
+                flags.append('state_high_uncertainty')
             if belief_confidence < 0.25:
                 flags.append('belief_low_confidence')
-            if attention_temp_mean > 1.40:
-                flags.append('attention_temp_high')
+            if state_temp_mean > 1.40:
+                flags.append('state_temp_high')
             if cf_mask_mean < getattr(model, 'cf_mask_floor', 0.05):
                 flags.append('cf_mask_too_small')
             if cf_mask_mean > getattr(model, 'cf_mask_ceiling', 0.95):

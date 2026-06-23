@@ -63,17 +63,13 @@ if __name__ == '__main__':
                 args.intent_dropout, args.intent_diversity_margin,
                 args.intent_assignment_weight))
     logging.info(
-        "Key Params |belief init_var:{} init_mass:{} temp:{} prior_weight:{} var_min:{}|"
+        "Key Params |belief init_var:{} init_mass:{} prior_weight:{} var_min:{}|"
         .format(args.belief_init_var, args.belief_init_mass,
-                args.belief_temp, args.belief_prior_weight,
-                args.intent_var_min))
+                args.belief_prior_weight, args.intent_var_min))
     logging.info(
-        "Key Params |attention uncertainty_enabled:{} intent_bias_enabled:{} base_temp:{} temp_scale:{} logit_scale:{} intent_bias_scale:{} prob_power:{} temp_min:{} temp_max:{}|"
-        .format(args.use_uncertainty_attention, args.use_intent_logit_bias,
-                args.attention_base_temp, args.uncertainty_temp_scale,
-                args.attention_logit_scale, args.intent_logit_bias_scale,
-                args.attention_prob_power, args.transformer_temp_min,
-                args.transformer_temp_max))
+        "Key Params |attention intent_bias_scale:{} state_temp_scale:{} state_temp_max:{}|"
+        .format(args.intent_bias_scale, args.state_temp_scale,
+                args.state_temp_max))
     logging.info(
         "Key Params |counterfactual gate_scale:{} consistency_weight:{} src_loss_weight:{}|"
         .format(args.cf_gate_scale, args.cf_consistency_weight,
