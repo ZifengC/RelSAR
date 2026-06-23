@@ -772,7 +772,7 @@ class UniSAR(BaseModel):
         items_emb = self.session_embedding.get_item_emb(items)
         batch_size = items_emb.size(0)
 
-        user_feats, _, _, _, _ = self.forward(
+        user_feats, _, _, _ = self.forward(
             user, all_his, all_his_type, items, items_emb, domain='rec')
 
         logits = self.inter_pred(user_feats, items_emb, domain="rec").reshape(
@@ -832,7 +832,7 @@ class UniSAR(BaseModel):
         items_emb = self.session_embedding.get_item_emb(items)
         batch_size = items_emb.size(0)
 
-        user_feats, _, _, _, _ = self.forward(
+        user_feats, _, _, _ = self.forward(
             user,
             all_his,
             all_his_type,
