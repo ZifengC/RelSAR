@@ -96,7 +96,14 @@ def infer_intent_num(state_dict: dict) -> int:
 
 def get_split_loaders(runner: SarRunner, split: str):
     if split == 'train':
-        return runner.rec_train_loader, runner.src_train_loader, runner.traindata['rec'], runner.traindata['src']
+        # Export rows are matched to sampler.data by position. Training loaders
+        # shuffle, so use separate ordered loaders without changing training.
+        rec_data, src_data = runner.traindata['rec'], runner.traindata['src']
+        rec_loader = runner.getDataLoader(
+            rec_data, batch_size=runner.rec_train_loader.batch_size, shuffle=False)
+        src_loader = runner.getDataLoader(
+            src_data, batch_size=runner.src_train_loader.batch_size, shuffle=False)
+        return rec_loader, src_loader, rec_data, src_data
     if split == 'val':
         return runner.rec_val_loader, runner.src_val_loader, runner.valdata['rec'], runner.valdata['src']
     if split == 'test':
